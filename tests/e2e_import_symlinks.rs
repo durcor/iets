@@ -24,6 +24,10 @@ impl Fixture {
     }
 
     fn with_self_setting(submodules: Option<bool>) -> Option<Self> {
+        Self::with_default_links(submodules, 1)
+    }
+
+    fn with_default_links(submodules: Option<bool>, links: usize) -> Option<Self> {
         let store = Store::start_with(&[])?;
         let repo = store.dir().join("repo");
         fs::create_dir_all(repo.join(".config/nixos")).unwrap();
@@ -96,11 +100,19 @@ impl Fixture {
             "\"directory-target\"\n",
         )
         .unwrap();
-        symlink(
-            "../modules/default.nix",
-            repo.join(".config/nixos/default.nix"),
-        )
-        .unwrap();
+        for link in 0..links {
+            let name = if link == 0 {
+                "default.nix".to_string()
+            } else {
+                format!("default-{link}.nix")
+            };
+            let target = if link + 1 == links {
+                "../modules/default.nix".to_string()
+            } else {
+                format!("default-{}.nix", link + 1)
+            };
+            symlink(target, repo.join(".config/nixos").join(name)).unwrap();
+        }
         symlink("../private.nix", repo.join("private-default/default.nix")).unwrap();
         fs::write(repo.join(".config/nixos/value.nix"), "\"target-one\"\n").unwrap();
         fs::write(
@@ -318,6 +330,58 @@ fn committed_imports_resolve_before_any_oracle_materialization() {
             let n = f.nix(attr);
             assert!(!n.status.success(), "oracle accepted {attr}");
             assert!(n.stdout.is_empty(), "oracle exposed {attr}");
+        }
+    }
+}
+
+#[test]
+fn committed_directory_imports_keep_resolved_bytes_and_directory_base() {
+    for (submodules, pinned) in [
+        (Some(false), false),
+        (Some(true), false),
+        (None, true),
+        (Some(false), true),
+        (Some(true), true),
+    ] {
+        let Some(mut f) = Fixture::with_default_links(submodules, 33) else {
+            return;
+        };
+        if pinned {
+            let rev = stdout(&git(&f.repo, &["rev-parse", "HEAD"]));
+            f.reference = format!("git+file://{}?rev={rev}", f.repo.display());
+        }
+        let source = f.iets("source", false);
+        assert!(source.status.success(), "{}", stderr(&source));
+        let source: String = serde_json::from_slice(&source.stdout).unwrap();
+        assert!(!PathBuf::from(&source).exists(), "source already exists");
+
+        // Directory imports retain .config/nixos as their parse base, while
+        // explicit leaf imports use the resolved .config/modules target.
+        // Every native run precedes Nix, including cache population/hits.
+        let checks = [
+            ("directory", "\"target-one\""),
+            ("scopedDirectory", "\"target-one\""),
+            ("defaultLeaf", "\"directory-target\""),
+            ("scopedDefaultLeaf", "\"directory-target\""),
+        ];
+        for (attr, expected) in checks {
+            for (run, cached) in [false, true, true].into_iter().enumerate() {
+                let i = f.iets(attr, cached);
+                assert!(i.status.success(), "{attr}: {}", stderr(&i));
+                assert_eq!(stdout(&i), expected, "{attr}: native result");
+                if run == 2 {
+                    assert!(stderr(&i).contains("cache: hit"), "{}", stderr(&i));
+                }
+            }
+        }
+        assert!(
+            !PathBuf::from(&source).exists(),
+            "native imports materialized the source: {source}"
+        );
+        for (attr, expected) in checks {
+            let n = f.nix(attr);
+            assert!(n.status.success(), "{attr}: {}", stderr(&n));
+            assert_eq!(stdout(&n), expected, "{attr}: Nix equality");
         }
     }
 }

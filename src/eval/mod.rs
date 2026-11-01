@@ -233,8 +233,9 @@ pub struct Evaluator {
     pub files: Files,
     pub globals: Globals,
     pub root_env: &'static EnvObj,
-    /// Resolved path -> lazy import thunk (`parallel::import_thunk`).
-    import_cache: SharedMap<Vec<u8>, Word>,
+    /// Compilation path -> lazy import thunk and its resolved byte accessor.
+    /// Directory imports keep default.nix as their identity, not its target.
+    import_cache: SharedMap<Vec<u8>, (Word, Option<Arc<SrcPath>>)>,
     /// `(prefix, path)` entries, `-I` first then `NIX_PATH`.
     search_path: Vec<(Vec<u8>, Vec<u8>)>,
     pub call_depth: u32,
@@ -944,13 +945,15 @@ impl Evaluator {
 
     /// `import`: parse, compile, evaluate and cache a file.
     pub fn eval_file(&mut self, path: &[u8], pos: Pos) -> EvalResult<Word> {
-        let resolved = self.resolve_import_path(path, pos)?;
-        // parallel: one lazy thunk per file; forcing it does the work once
-        let w = match self.import_cache.get(&resolved) {
-            Some(w) => w,
+        let (resolved, source) = self.resolve_import_path(path, pos)?;
+        // parallel: one lazy thunk per file; forcing it does the work once.
+        // Keep the accessor with it so the byte read does not resolve again.
+        let (w, _) = match self.import_cache.get(&resolved) {
+            Some(entry) => entry,
             None => {
                 let t = parallel::import_thunk(self, &resolved, pos);
-                self.import_cache.get_or_insert(resolved, t)
+                self.import_cache
+                    .get_or_insert(resolved, (t, source.map(Arc::new)))
             }
         };
         self.force(w)
@@ -964,8 +967,11 @@ impl Evaluator {
         path: &[u8],
         pos: Pos,
     ) -> EvalResult<Word> {
-        let resolved = self.resolve_import_path(path, pos)?;
-        let src = self.read_source(&resolved, pos)?;
+        let (resolved, source) = self.resolve_import_path(path, pos)?;
+        let src = match source {
+            Some(at) => self.read_source_at(&resolved, &at, pos)?,
+            None => self.read_source(&resolved, pos)?,
+        };
         let names: Vec<Sym> = scope.iter().map(|a| a.sym).collect();
         let dir = dir_of(&resolved).to_vec();
         let ir = self.compile_path(&resolved, src, &dir, Some(&names))?;
@@ -976,10 +982,14 @@ impl Evaluator {
         self.eval(env, ir)
     }
 
-    fn resolve_import_path(&mut self, path: &[u8], pos: Pos) -> EvalResult<Vec<u8>> {
+    fn resolve_import_path(
+        &mut self,
+        path: &[u8],
+        pos: Pos,
+    ) -> EvalResult<(Vec<u8>, Option<SrcPath>)> {
         let mut p = path.to_vec();
         if p.starts_with(CorePkgs::PREFIX) {
-            return Ok(p);
+            return Ok((p, None));
         }
         // Walk the virtual tree before checking visibility: a tracked link
         // may name a directory whose children exist only at its target path.
@@ -1020,12 +1030,11 @@ impl Evaluator {
         match at.is_dir(self) {
             Ok(true) => {
                 p.extend_from_slice(b"/default.nix");
-                let (resolved, at) =
+                let (resolved, target) =
                     store_hooks::located(self, p.clone(), store_hooks::Follow::Full, pos)?;
-                // Nix appends default.nix after resolving the directory. Check
-                // its target's visibility, but retain that directory as the
-                // relative-import base even when default.nix is a symlink.
-                store_hooks::check(self, at, &resolved, store_hooks::Follow::Full, pos)?;
+                // Nix keeps the directory's default.nix as the compilation
+                // identity/base, but reads bytes from the resolved target.
+                at = store_hooks::check(self, target, &resolved, store_hooks::Follow::Full, pos)?;
             }
             Ok(false) => {}
             Err(e) => bail!(
@@ -1036,7 +1045,7 @@ impl Evaluator {
                 crate::error::io_text(&e)
             ),
         }
-        Ok(p)
+        Ok((p, Some(at)))
     }
 
     /// `<name>` lookup.
@@ -1104,13 +1113,25 @@ impl Evaluator {
         {
             return Ok(src.to_vec());
         }
-        match store_hooks::resolve(self, resolved).read(self, false) {
+        if let Some((_, Some(at))) = self.import_cache.get(resolved) {
+            return self.read_source_at(resolved, &at, pos);
+        }
+        // Scoped imports are not cached. Recover their byte target only when
+        // a later lint finding needs to reread the compilation identity.
+        let (target, at) =
+            store_hooks::located(self, resolved.to_vec(), store_hooks::Follow::Full, pos)?;
+        let at = store_hooks::check(self, at, &target, store_hooks::Follow::Full, pos)?;
+        self.read_source_at(resolved, &at, pos)
+    }
+
+    fn read_source_at(&self, path: &[u8], at: &SrcPath, pos: Pos) -> EvalResult<Vec<u8>> {
+        match at.read(self, false) {
             Ok(s) => Ok(s),
             Err((_, e)) => bail!(
                 ErrorKind::Io,
                 pos,
                 "opening file '{}': {}",
-                String::from_utf8_lossy(resolved),
+                String::from_utf8_lossy(path),
                 e
             ),
         }
