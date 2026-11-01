@@ -192,8 +192,7 @@ fn workdir_root(url: &str) -> Option<String> {
 
 /// git.cc:getAccessorFromWorkdir, with fetchTree.cc:emitTreeAttrs'
 /// `emptyRevFallback`. `None` when Nix must answer: the tree is not a
-/// working tree, it has submodules to copy, or its count needs history
-/// that a shallow clone does not have.
+/// working tree, or its count needs history that a shallow clone does not have.
 fn from_workdir(
     ev: &mut Evaluator,
     args: &Attrs,
@@ -206,18 +205,12 @@ fn from_workdir(
         return Ok(None);
     }
     let submodules = bool_attr(args, "submodules").unwrap_or(false);
-    if submodules {
-        let gitmodules = root.join(".gitmodules");
-        let found = ev
-            .trace()
-            .stat_now(gitmodules.as_os_str().as_bytes(), false);
-        if found != Kind::Missing {
-            return Ok(None);
-        }
-    }
     let name = str_attr(args, "name").unwrap_or("source");
-    let export = bool_attr(args, "exportIgnore").unwrap_or(false);
-    let (mut tree, dirty) = source::workdir(ev, git, root, name, export, pos)?;
+    let options = source::CopyOptions {
+        export_ignore: bool_attr(args, "exportIgnore").unwrap_or(false),
+        submodules,
+    };
+    let (mut tree, dirty) = source::workdir(ev, git, root, name, options, pos)?;
     let shallow = bool_attr(args, "shallow").unwrap_or(false);
     if !dirty && !shallow && tree.counter.is_none() {
         return Ok(None);
@@ -271,9 +264,12 @@ fn from_commit(
         }
         _ => return Ok(None),
     };
-    let export = bool_attr(args, "exportIgnore").unwrap_or(false);
+    let options = source::CopyOptions {
+        export_ignore: bool_attr(args, "exportIgnore").unwrap_or(false),
+        submodules: false,
+    };
     let name = str_attr(args, "name").unwrap_or("source");
-    source::commit_tree(ev, git, root, &rev, name, export, pos)
+    source::commit_tree(ev, git, root, &rev, name, options, pos)
 }
 
 /// A full revision that is not the null one; any other spelling goes to Nix,

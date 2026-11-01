@@ -306,7 +306,28 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
         };
         source::scm::record_detect(ev.trace(), &fr.dir, found);
     }
-    let root = source::tree(ev, &fr.source, pos)?;
+    // Read the flake's source settings before hashing the tree. In particular,
+    // inputs.self is metadata about this source, not a dependency to lock.
+    let flake_path = fr.dir.join("flake.nix");
+    let bytes = match &fr.source {
+        SourceRef::Commit { scm, root, rev, subdir } => {
+            let path = if subdir.is_empty() {
+                "flake.nix".to_string()
+            } else {
+                format!("{subdir}/flake.nix")
+            };
+            scm.read_at(ev.trace(), root, rev, &path)
+                .map_err(|e| EvalError::boxed(ErrorKind::Io, e, pos))?
+        }
+        _ => read_traced(ev, &flake_path)
+            .map_err(|e| EvalError::boxed(ErrorKind::Io, e.to_string(), pos))?,
+    };
+    // Nix requires source attributes to be trivial values. The actual flake
+    // is imported and linted below, through its filtered store tree.
+    let ir = ev.compile_internal(&sys::path_to_internal(&flake_path), &bytes)?;
+    let flake = ev.eval(ev.root_env, ir)?;
+    let submodules = root_submodules(ev, flake, pos)?;
+    let root = source::tree(ev, &fr.source, submodules, pos)?;
     let source_info = fetch::emit_tree_attrs(ev, &root, Some("self"), pos)?;
     let subdir = root.subdir;
     let out_path = {
@@ -521,10 +542,39 @@ pub fn select(ev: &mut Evaluator, mut v: Word, path: &[String]) -> EvalResult<Op
     Ok(Some(v))
 }
 
+/// Only inspect self settings here; dependency URLs and outputs must be
+/// evaluated against the final filtered source, not the host working tree.
+fn root_submodules(ev: &mut Evaluator, flake: Word, pos: Pos) -> EvalResult<bool> {
+    let attrs = ev.force_attrs(flake, pos, "while evaluating flake.nix")?;
+    let Some(inputs) = attrs.get(ev.sym(b"inputs")) else {
+        return Ok(false);
+    };
+    let inputs = ev.force_attrs(inputs.cell.get(), pos, "while evaluating flake inputs")?;
+    let Some(settings) = inputs.get(ev.sym(b"self")) else {
+        return Ok(false);
+    };
+    let settings = ev.force_attrs(settings.cell.get(), pos, "while evaluating 'inputs.self'")?;
+    let submodules = ev.sym(b"submodules");
+    if let Some(a) = settings.iter().find(|a| a.sym != submodules) {
+        return Err(EvalError::boxed(
+            ErrorKind::Unsupported,
+            format!(
+                "root source option 'inputs.self.{}' is not supported",
+                String::from_utf8_lossy(ev.interner.name(a.sym))
+            ),
+            pos,
+        ));
+    }
+    match settings.get(submodules) {
+        Some(a) => ev.force_bool(a.cell.get(), pos, "while evaluating 'inputs.self.submodules'"),
+        None => Ok(false),
+    }
+}
+
 /// Every input `flake.nix` declares must have a lock entry; Nix would
 /// otherwise fetch and lock it. flake.cc:getFlake declares one for each
-/// name in `inputs`, and one for each formal of `outputs` but `self`.
-/// True when `flake.nix` has a `nixConfig`.
+/// dependency name in `inputs`, and one for each formal of `outputs` but
+/// `self`. Returns whether `nixConfig` is present.
 fn check_declared_inputs(
     ev: &mut Evaluator,
     flake_dir: &[u8],
@@ -533,17 +583,18 @@ fn check_declared_inputs(
 ) -> EvalResult<bool> {
     let mut p = flake_dir.to_vec();
     p.extend_from_slice(b"/flake.nix");
-    let v = ev.eval_file(&p, pos)?;
-    let attrs = ev.force_attrs(v, pos, "while evaluating flake.nix")?;
+    let flake = ev.eval_file(&p, pos)?;
+    let attrs = ev.force_attrs(flake, pos, "while evaluating flake.nix")?;
     let mut declared = Vec::new();
     let mut inputs = None;
+    let self_sym = ev.sym(b"self");
     if let Some(a) = attrs.get(ev.sym(b"inputs")) {
         let a = ev.force_attrs(
             a.cell.get(),
             pos,
             "while evaluating the 'inputs' attribute of flake.nix",
         )?;
-        declared.extend(a.iter().map(|a| (a.sym, "")));
+        declared.extend(a.iter().filter(|a| a.sym != self_sym).map(|a| (a.sym, "")));
         inputs = Some(a);
     }
     if let Some(outputs) = attrs.get(ev.sym(b"outputs")) {
@@ -551,7 +602,6 @@ fn check_declared_inputs(
         if let Value::Lambda(l) = outputs.view()
             && let ParamIr::Formals { formals, .. } = &l.lam.param
         {
-            let self_sym = ev.sym(b"self");
             let implicit = ", an argument of 'outputs' that Nix looks up in the flake registry,";
             declared.extend(
                 formals
@@ -593,6 +643,9 @@ fn check_inputs(
 ) -> EvalResult<()> {
     for a in inputs.iter() {
         let name = String::from_utf8_lossy(ev.interner.name(a.sym)).into_owned();
+        if path.is_empty() && name == "self" {
+            continue;
+        }
         let at = if path.is_empty() {
             name.clone()
         } else {

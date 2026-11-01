@@ -32,6 +32,13 @@ pub(crate) use remote::{
     ensure_readable, fetch_file, fetch_git_with_nix, store_commit, valid_in_store,
 };
 
+/// Options that change which files a local SCM source contains.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CopyOptions {
+    pub export_ignore: bool,
+    pub submodules: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttrVal {
     Str(String),
@@ -174,18 +181,19 @@ impl Tree {
 
 /// The tree a reference names, copied or fetched if it is not here yet. The
 /// caller gets a store path that can be read, hashed and uploaded.
-pub fn tree(ev: &mut Evaluator, r: &SourceRef, pos: Pos) -> EvalResult<Tree> {
+/// `submodules` configures local SCM trees; locked inputs carry their own options.
+pub fn tree(ev: &mut Evaluator, r: &SourceRef, submodules: bool, pos: Pos) -> EvalResult<Tree> {
     match r {
         SourceRef::Path(dir) => local::path_source(ev, dir, pos),
         SourceRef::Tracked { scm, root, subdir } => {
-            local::tracked_source(ev, *scm, root, subdir, pos)
+            local::tracked_source(ev, *scm, root, subdir, submodules, pos)
         }
         SourceRef::Commit {
             scm,
             root,
             rev,
             subdir,
-        } => local::commit_source(ev, *scm, root, rev, subdir, pos),
+        } => local::commit_source(ev, *scm, root, rev, subdir, submodules, pos),
         SourceRef::Locked(attrs) => remote::locked(ev, attrs, pos),
     }
 }

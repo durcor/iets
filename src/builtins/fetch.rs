@@ -239,7 +239,7 @@ pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
             }
         }
         "github" | "gitlab" | "sourcehut" | "git" | "tarball" | "hg" => {
-            source::tree(ev, &SourceRef::Locked(attrs), pos)?
+            source::tree(ev, &SourceRef::Locked(attrs), false, pos)?
         }
         other => bail!(
             ErrorKind::Unsupported,

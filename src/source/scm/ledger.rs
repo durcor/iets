@@ -43,7 +43,7 @@ impl Scm for Ledger {
         dir.join(".ledger")
     }
 
-    fn snapshot(&self, trace: &Trace, root: &Path) -> Result<Snapshot, String> {
+    fn snapshot(&self, trace: &Trace, root: &Path, _submodules: bool) -> Result<Snapshot, String> {
         let dot = root.join(".ledger");
         let tracked = read(trace, &dot.join("tracked"))?;
         let head = dot.join("head");
@@ -88,6 +88,7 @@ impl Scm for Ledger {
         root: &Path,
         rev: &str,
         _export: bool,
+        _submodules: bool,
     ) -> Result<Option<Commit>, String> {
         let Ok(text) = fs::read_to_string(root.join(".ledger/revs").join(rev)) else {
             return Ok(None);
@@ -192,7 +193,7 @@ mod tests {
     }
 
     fn read_tree(ev: &mut Evaluator, root: &Path) -> Tree {
-        tree(ev, &source(root), Pos::NONE).unwrap()
+        tree(ev, &source(root), false, Pos::NONE).unwrap()
     }
 
     fn attrs(pairs: &[(&str, AttrVal)], root: &Path, nar_hash: String) -> Attrs {
@@ -338,11 +339,11 @@ mod tests {
         assert_eq!(trace.take().len(), 2);
         assert!(
             Ledger
-                .tree_at(&trace, &root, "r12", true)
+                .tree_at(&trace, &root, "r12", true, false)
                 .unwrap()
                 .is_none()
         );
-        let c = Ledger.tree_at(&trace, &root, "r3", true).unwrap().unwrap();
+        let c = Ledger.tree_at(&trace, &root, "r3", true, false).unwrap().unwrap();
         assert_eq!((c.rev.as_str(), c.last_modified), ("r3", 1600000000));
         let files: Vec<(&[u8], &[u8])> = c
             .entries

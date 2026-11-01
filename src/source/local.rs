@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::{fs, io};
 
 use super::scm::Scm;
-use super::{AttrVal, Attrs, Tree, store_commit};
+use super::{AttrVal, Attrs, CopyOptions, Tree, store_commit};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::store::hash::{Hash, HashAlgo};
 use crate::store::nar;
@@ -134,9 +134,11 @@ pub fn tracked_source(
     scm: &'static dyn Scm,
     root: &Path,
     subdir: &str,
+    submodules: bool,
     pos: Pos,
 ) -> EvalResult<Tree> {
-    let (mut tree, _) = workdir(ev, scm, root, "source", false, pos)?;
+    let options = CopyOptions { submodules, ..CopyOptions::default() };
+    let (mut tree, _) = workdir(ev, scm, root, "source", options, pos)?;
     tree.subdir = subdir.to_string();
     Ok(tree)
 }
@@ -151,11 +153,12 @@ pub fn commit_tree(
     root: &Path,
     rev: &str,
     name: &str,
-    export: bool,
+    options: CopyOptions,
     pos: Pos,
 ) -> EvalResult<Option<Tree>> {
+    let CopyOptions { export_ignore: export, submodules } = options;
     let commit = scm
-        .tree_at(ev.trace(), root, rev, export)
+        .tree_at(ev.trace(), root, rev, export, submodules)
         .map_err(|e| Error::boxed(ErrorKind::Io, e, pos))?;
     let Some(commit) = commit else {
         return Ok(None);
@@ -176,7 +179,7 @@ pub fn commit_tree(
             ("narHash".into(), AttrVal::Str(hash.to_sri())),
             ("rev".into(), AttrVal::Str(rev.to_string())),
             ("lastModified".into(), AttrVal::Int(last_modified)),
-            ("submodules".into(), AttrVal::Bool(false)),
+            ("submodules".into(), AttrVal::Bool(submodules)),
         ]),
         subdir: String::new(),
         counter: Some((scm, root.to_path_buf())),
@@ -191,9 +194,11 @@ pub fn commit_source(
     root: &Path,
     rev: &str,
     subdir: &str,
+    submodules: bool,
     pos: Pos,
 ) -> EvalResult<Tree> {
-    let Some(mut tree) = commit_tree(ev, scm, root, rev, "source", false, pos)? else {
+    let options = CopyOptions { submodules, ..CopyOptions::default() };
+    let Some(mut tree) = commit_tree(ev, scm, root, rev, "source", options, pos)? else {
         return Err(Error::boxed(
             ErrorKind::Io,
             format!(
@@ -216,11 +221,19 @@ pub fn workdir(
     scm: &'static dyn Scm,
     root: &Path,
     name: &str,
-    export: bool,
+    options: CopyOptions,
     pos: Pos,
 ) -> EvalResult<(Tree, bool)> {
+    let CopyOptions { export_ignore: export, submodules } = options;
+    if export && submodules {
+        return Err(Error::boxed(
+            ErrorKind::Unsupported,
+            "exportIgnore and submodules are not supported together yet",
+            pos,
+        ));
+    }
     let at = scm
-        .snapshot(ev.trace(), root)
+        .snapshot(ev.trace(), root, submodules)
         .map_err(|e| Error::boxed(ErrorKind::Io, e, pos))?;
     let mut accepted = accepted_set(root, &at.files);
     if export {
@@ -259,6 +272,9 @@ pub fn workdir(
     );
     let mut attrs = Attrs::new();
     attrs.insert("type".into(), AttrVal::Str(scm.name().into()));
+    if submodules {
+        attrs.insert("submodules".into(), AttrVal::Bool(true));
+    }
     attrs.insert(
         "url".into(),
         AttrVal::Str(format!(
