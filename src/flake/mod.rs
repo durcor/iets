@@ -339,24 +339,21 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
     // Nix resolves a clean root to its revision before applying self settings.
     // Refetching with submodules therefore reads gitlink revisions, not child
     // worktree edits. An already-dirty parent keeps its working-tree source.
-    let mut resolved_source = None;
-    if submodules.is_some()
+    // `rev` is retained only for a clean initial snapshot. Reuse that result
+    // instead of repeating the same-mode working-tree observation.
+    let resolved_source = if submodules.is_some()
         && let SourceRef::Tracked { scm, root, subdir } = &fr.source
+        && let Some(rev) = initial_tree.rev()
     {
-        let initial = scm
-            .snapshot(ev.trace(), root, false)
-            .map_err(|e| EvalError::boxed(ErrorKind::Io, e, pos))?;
-        if !initial.dirty
-            && let Some(rev) = initial.rev
-        {
-            resolved_source = Some(SourceRef::Commit {
-                scm: *scm,
-                root: root.clone(),
-                rev,
-                subdir: subdir.clone(),
-            });
-        }
-    }
+        Some(SourceRef::Commit {
+            scm: *scm,
+            root: root.clone(),
+            rev: rev.to_string(),
+            subdir: subdir.clone(),
+        })
+    } else {
+        None
+    };
     let root = if resolved_source.is_none() && !submodules.unwrap_or(false) {
         initial_tree
     } else {
