@@ -392,7 +392,12 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
     if let Ok(sp) = StorePath::parse(&String::from_utf8_lossy(&out_path)) {
         ev.known.name_flake(&sp, lock.root.clone());
         if top {
-            ev.known.mark_root(&sp);
+            match &fr.source {
+                SourceRef::Path(dir)
+                | SourceRef::Tracked { root: dir, .. }
+                | SourceRef::Commit { root: dir, .. } => ev.known.mark_root(&sp, dir.clone()),
+                SourceRef::Locked(_) => {}
+            }
         }
     }
     let mut flake_dir = out_path.clone();

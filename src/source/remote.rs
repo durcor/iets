@@ -516,6 +516,17 @@ fn local_file(ev: &Evaluator, url: &str, pos: Pos) -> EvalResult<Option<SrcPath>
         return Ok(None);
     };
     let (_, at) = store_hooks::local_source(ev, path.as_bytes(), pos)?;
+    // A known flat hash may already be cached under the same basename. Prove
+    // that the final source actually contains this member before that cache
+    // can answer, including a committed tree with no mutable filter to reject
+    // checkout-only files.
+    at.stat(ev, true).map_err(|e| {
+        Error::boxed(
+            ErrorKind::Io,
+            format!("getting status of '{path}': {}", crate::error::io_text(&e)),
+            pos,
+        )
+    })?;
     Ok(Some(at))
 }
 

@@ -340,10 +340,10 @@ pub struct Known {
     pub flake: Option<String>,
     /// Copied from a local path by this evaluation (`read-through-copy`).
     pub copy: bool,
-    /// The tree of the flake on the command line. A fetch from the local
-    /// file system reads below its directory through this copy
-    /// (`builtins::store_hooks::local_source`).
-    pub root: bool,
+    /// The checkout directory represented by the command-line flake tree.
+    /// This association is independent of `origin`: a committed root can be
+    /// spool-backed while local fetch URLs still name its checkout.
+    pub root: Option<PathBuf>,
 }
 
 impl SharedMap<StorePath, Known> {
@@ -384,24 +384,24 @@ impl SharedMap<StorePath, Known> {
         }
     }
 
-    pub fn mark_root(&self, p: &StorePath) {
+    pub fn mark_root(&self, p: &StorePath, dir: PathBuf) {
         if let Some(k) = self.lock().get_mut(p) {
-            k.root = true;
+            k.root = Some(dir);
         }
     }
 
-    /// The root tree and the local directory it stands for.
+    /// The final root tree and the checkout directory it represents.
     pub fn root_tree(&self) -> Option<(StorePath, PathBuf)> {
-        let t = self.lock();
-        let (p, k) = t.iter().find(|(_, k)| k.root)?;
-        let dir = k.origin.as_ref()?.at.local()?;
-        Some((p.clone(), dir))
+        self.lock()
+            .iter()
+            .find_map(|(p, k)| k.root.as_ref().map(|dir| (p.clone(), dir.clone())))
     }
 
     /// The locked trees no local directory stands for, by lock node name.
     pub fn inputs(&self) -> Vec<(StorePath, String)> {
         self.lock()
             .iter()
+            .filter(|(_, k)| k.root.is_none())
             .filter(|(_, k)| k.origin.as_ref().and_then(|o| o.at.local()).is_none())
             .filter_map(|(p, k)| Some((p.clone(), k.flake.clone()?)))
             .collect()
