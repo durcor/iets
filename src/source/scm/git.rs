@@ -679,10 +679,23 @@ mod tests {
             b"submodule.child.path\n./child\0submodule.nested.path\nprefix/../nested//./leaf/\0",
         )
         .unwrap();
-        assert_eq!(paths, [std::path::PathBuf::from("child"), "nested/leaf".into()]);
-        for path in ["", ".", "child/..", "../child", "child/../../escape", "/child"] {
+        assert_eq!(
+            paths,
+            [std::path::PathBuf::from("child"), "nested/leaf".into()]
+        );
+        for path in [
+            "",
+            ".",
+            "child/..",
+            "../child",
+            "child/../../escape",
+            "/child",
+        ] {
             let record = format!("submodule.child.path\n{path}\0");
-            assert!(super::parse_submodule_paths(record.as_bytes()).is_err(), "{path}");
+            assert!(
+                super::parse_submodule_paths(record.as_bytes()).is_err(),
+                "{path}"
+            );
         }
     }
 

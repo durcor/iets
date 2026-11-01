@@ -84,10 +84,12 @@ outermost `iets.toml` one, else the entry's own directory
 
 **The accessor** is `store_hooks::local_source`. It does what a read does:
 
-1. A path at or below the root flake's directory becomes the path under the
-   root tree's store copy. So the tree's filter applies: a file the source
-   control system does not track is `not tracked by Git`, as it is for
-   `readFile`.
+1. A path at or below the root checkout's directory becomes the path under
+   the final root tree's store copy, including for a flake in a repository
+   subdirectory. The source's tracked-file visibility applies. A clean root
+   refetched at its commit, or an explicitly pinned root, reads committed
+   bytes rather than mutable checkout bytes, even before the source exists
+   in the real store.
 2. Every link on the way is resolved on the text of the path, one component
    after the other, as Nix's `SourceAccessor::resolveSymlinks` does. The
    kernel is not asked to follow one.
@@ -109,6 +111,12 @@ a lock whose inputs lie elsewhere on the machine.
 The check comes before `/nix/store` and the input store are asked. So what
 is allowed does not change with what a cache holds, and a hash the
 evaluation knows does not buy the bytes of a file it may not read.
+
+For a source-tree member, the check also proves that the member exists in
+that final tree before a flat-hash cache can answer. An untracked checkout
+file cannot borrow a cached fetch with the same name and hash. An ordinary
+project is an allow list rather than a source copy: an allowed project URL
+can still reuse its cached bytes offline after its original file is removed.
 
 A plain read in a project is judged the same way. `readFile`, `readDir`,
 `hashFile`, `builtins.path`, `import` and the copy of `"${./x}"` resolve the

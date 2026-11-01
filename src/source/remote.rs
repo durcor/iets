@@ -515,18 +515,21 @@ fn local_file(ev: &Evaluator, url: &str, pos: Pos) -> EvalResult<Option<SrcPath>
     let Some(path) = http::local_path(url) else {
         return Ok(None);
     };
-    let (_, at) = store_hooks::local_source(ev, path.as_bytes(), pos)?;
+    let (resolved, at) = store_hooks::local_source(ev, path.as_bytes(), pos)?;
     // A known flat hash may already be cached under the same basename. Prove
-    // that the final source actually contains this member before that cache
-    // can answer, including a committed tree with no mutable filter to reject
-    // checkout-only files.
-    at.stat(ev, true).map_err(|e| {
-        Error::boxed(
-            ErrorKind::Io,
-            format!("getting status of '{path}': {}", crate::error::io_text(&e)),
-            pos,
-        )
-    })?;
+    // that a source tree actually contains this member before that cache can
+    // answer, including a committed tree with no mutable filter to reject
+    // checkout-only files. A project is an allow list, not a source copy:
+    // an allowed URL can still use its cached bytes after the file is removed.
+    if ev.known.under(&resolved).is_some() {
+        at.stat(ev, true).map_err(|e| {
+            Error::boxed(
+                ErrorKind::Io,
+                format!("getting status of '{path}': {}", crate::error::io_text(&e)),
+                pos,
+            )
+        })?;
+    }
     Ok(Some(at))
 }
 

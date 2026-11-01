@@ -1195,13 +1195,24 @@ fn submodule_paths_normalize_and_keep_first_configuration_value() {
     git(
         &child,
         &[
-            "-c", "protocol.file.allow=always", "submodule", "add", "-q",
-            leaf.to_str().unwrap(), "nested",
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            leaf.to_str().unwrap(),
+            "nested",
         ],
     );
     git(
         &child,
-        &["config", "--file", ".gitmodules", "submodule.nested.path", "./nested"],
+        &[
+            "config",
+            "--file",
+            ".gitmodules",
+            "submodule.nested.path",
+            "./nested",
+        ],
     );
     git(&child, &["add", "-A"]);
     git(&child, &["commit", "-qm", "normalized nested mapping"]);
@@ -1229,15 +1240,46 @@ fn submodule_paths_normalize_and_keep_first_configuration_value() {
         git(
             &repo,
             &[
-                "-c", "protocol.file.allow=always", "submodule", "add", "-q",
-                child.to_str().unwrap(), path,
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                child.to_str().unwrap(),
+                path,
             ],
         );
     }
+    // Git's update command cannot match a gitlink to `./nested`. Initialize
+    // through the canonical spelling, then restore the committed mapping
+    // before either evaluator sees the fixture.
+    let nested_configs: Vec<_> = ["a", "b"]
+        .into_iter()
+        .map(|path| {
+            let config = repo.join(path).join(".gitmodules");
+            let original = fs::read_to_string(&config).unwrap();
+            fs::write(
+                &config,
+                original.replace("path = ./nested", "path = nested"),
+            )
+            .unwrap();
+            (config, original)
+        })
+        .collect();
     git(
         &repo,
-        &["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
     );
+    for (config, original) in nested_configs {
+        fs::write(config, original).unwrap();
+    }
     let git_bin = f.work().join("git-only");
     mkdir(&git_bin);
     symlink(e2e::resolved("git"), git_bin.join("git")).unwrap();
@@ -1248,12 +1290,17 @@ fn submodule_paths_normalize_and_keep_first_configuration_value() {
         ("IETS_CACHE", "0"),
     ];
     for (path, distinct) in [("./a", false), ("prefix/../a//./", false), ("./a", true)] {
-        let second = if distinct { "[submodule \"Selected\"]\n" } else { "" };
+        let second = if distinct {
+            "[submodule \"Selected\"]\n"
+        } else {
+            ""
+        };
         write(
             &repo.join(".gitmodules"),
             &format!(
                 "[submodule \"selected\"]\npath = {path}\nurl = {}\n{second}path = ./b\nurl = {}\n",
-                child.display(), child.display()
+                child.display(),
+                child.display()
             ),
         );
         git(&repo, &["add", "-A"]);
@@ -1261,7 +1308,10 @@ fn submodule_paths_normalize_and_keep_first_configuration_value() {
         let rev = stdout(&git(&repo, &["rev-parse", "HEAD"]));
         // Keep the parent dirty so the unpinned case exercises workdir
         // parsing as well as the selected revision's committed parser.
-        write(&repo.join("flake.nix"), &(flake.to_owned() + "\n# working tree\n"));
+        write(
+            &repo.join("flake.nix"),
+            &(flake.to_owned() + "\n# working tree\n"),
+        );
         for pinned in [false, true] {
             let r = if pinned {
                 format!("git+file://{}?rev={}#v", repo.display(), rev.trim())
@@ -1299,18 +1349,27 @@ fn submodule_paths_normalize_and_keep_first_configuration_value() {
     for path in ["../path-child", "a/../../path-child"] {
         write(
             &repo.join(".gitmodules"),
-            &format!("[submodule \"escape\"]\npath = {path}\nurl = {}\n", child.display()),
+            &format!(
+                "[submodule \"escape\"]\npath = {path}\nurl = {}\n",
+                child.display()
+            ),
         );
         git(&repo, &["add", "-A"]);
         git(&repo, &["commit", "-qm", "escaping mapping"]);
         let rev = stdout(&git(&repo, &["rev-parse", "HEAD"]));
-        write(&repo.join("flake.nix"), &(flake.to_owned() + "\n# working tree\n"));
+        write(
+            &repo.join("flake.nix"),
+            &(flake.to_owned() + "\n# working tree\n"),
+        );
         for r in [
             format!("{}#v", repo.display()),
             format!("git+file://{}?rev={}#v", repo.display(), rev.trim()),
         ] {
             let native = f.iets_eval(&env, &["--raw", "--no-cache", "--pure-eval", &r]);
-            assert!(!native.status.success(), "escaping mapping {path} was accepted");
+            assert!(
+                !native.status.success(),
+                "escaping mapping {path} was accepted"
+            );
         }
         write(&repo.join("flake.nix"), flake);
     }

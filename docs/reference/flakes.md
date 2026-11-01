@@ -91,6 +91,12 @@ source hash and cached evaluation change when those files change; dirty
 children omit the root's clean revision/count metadata. `lastModified`
 remains the parent commit's date.
 
+Submodule paths are normalized within the repository: `./child` and
+`prefix/../child//./` select `child`, including in nested `.gitmodules`.
+Paths that escape the repository are rejected. Repeated assignments to one
+configuration key use its first value, as in Nix; distinct subsection names
+remain distinct.
+
 Initialize submodules with `git submodule update --init --recursive`
 before evaluating: iets reports an initialization error rather than
 fetching missing modules. This support does not add remote root fetching,

@@ -126,24 +126,27 @@ keeps the count by revision ([How caching works](caching.md)). A read gives
 the `rev-count` warning ([Lints](../reference/lints.md)): use
 `lastModifiedDate` and `shortRev` for a version string.
 
-iets computes the store path from the NAR hash of that tree, and **nothing
-is written or fetched**. The copy is virtual: the store path gets a note that
-says "the bytes of this path are in that local directory, filtered by that
-file set". Every read under it (`import`, `readFile`, `readDir`,
-`pathExists`, `hashFile`, a path interpolation, `builtins.path`) goes to your
-working tree, and the store is never consulted for the root tree.
+iets computes the store path from the NAR hash of that tree without writing
+the real store. The copy is virtual: every read under it (`import`,
+`readFile`, `readDir`, `pathExists`, `hashFile`, a path interpolation,
+`builtins.path`) uses the final source's accessor. A working-tree source
+reads the local directory through its tracked-file filter; a selected commit
+reads immutable bytes from the input store. Pure local fetch URLs below the
+checkout map to this same final source, even when it is not materialized in
+the real store or the flake lives in a repository subdirectory.
 
 
 
 In practice:
 
 
-- **Your edits are what is evaluated.** No copy step stands between saving
-  a file and evaluating it.
-- **Untracked files behave as git says.** Reading one fails with Nix's own
-  "Path '...' in the repository ... is not tracked by Git" error,
-  `pathExists` says `false`, and `readDir` does not list it. The tracked
-  file set is the filter, so iets and Nix disagree about nothing here.
+- **Working-tree edits are what is evaluated** when the final source is a
+  working tree. A clean parent's explicit self setting or a pinned root
+  instead selects committed bytes, as described above.
+- **Untracked files stay invisible.** In a working-tree source, reading one
+  fails with Nix's "Path '...' in the repository ... is not tracked by Git"
+  error. In a committed source it is absent. `pathExists` says `false`, and
+  `readDir` does not list it.
 
 The flake's own `flake.nix` is imported under its store path, so positions,
 `./x` path literals and `readDir` see exactly what Nix sees.
