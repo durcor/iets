@@ -6,7 +6,9 @@ mod e2e;
 mod hermetic;
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::process::Output;
 
 use e2e::{Builder, Store, ok, stdout};
 use serde_json::{Value, json};
@@ -313,7 +315,11 @@ impl Consumer {
             .iets()
             .args(["build", "--builder", &b.url(), "--impure", "--no-tracing-cache"])
             .arg(&self.file));
-        assert_eq!(stdout(&out), self.out, "original input-addressed output identity");
+        self.assert_result(s, b, f, &out);
+    }
+
+    fn assert_result(&self, s: &Store, b: &Builder, f: &Fixture, out: &Output) {
+        assert_eq!(stdout(out), self.out, "original input-addressed output identity");
         assert_eq!(fs::read(b.real(&self.out)).unwrap(), f.expected);
         let info = path_info(s, &self.out, Some(b));
         assert!(info["ca"].is_null());
@@ -456,5 +462,106 @@ fn a_genuinely_missing_source_is_still_substituted() {
     let b = s.builder("substituting", &[("substituters", &cache), ("require-sigs", "true")]);
     assert!(!valid(&s, &input, Some(&b)));
     assert!(!valid(&s, &consumer.out, Some(&b)));
+    consumer.build(&s, &b, &fixture);
+}
+
+#[test]
+fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_ca_sources() {
+    let s = store!();
+    let fixture = Fixture::new(&s, false);
+    let consumer = fixture.consumer(&s, "source-transfer-untrusted-consumer");
+    let b = s.builder("trust-boundary", &[("require-sigs", "true")]);
+
+    // As in the existing SSH transport fixture, the executable launcher avoids
+    // needing an SSH server. All worker requests go to a real nix-daemon, whose
+    // per-connection override makes even a same-uid/root client untrusted.
+    let ssh = s.write(
+        "untrusted-bin/ssh",
+        &format!(
+            "#!/bin/sh\nexec '{}' --store '{}' --extra-experimental-features daemon-trust-override --stdio --force-untrusted --option sandbox-paths /nix/store --option require-sigs true\n",
+            e2e::resolved("nix-daemon").display(),
+            b.store()
+        ),
+    );
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        ssh.parent().unwrap().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let url = "ssh-ng://forced-untrusted";
+
+    // A content-addressed source and its consumer must work over the exact
+    // same untrusted endpoint. A startup/transport failure cannot satisfy the
+    // rejection assertion below, nor can rejecting every unsigned path.
+    let input: String = serde_json::from_slice(
+        &ok(s.nix("nix-instantiate").args([
+            "--eval",
+            "--strict",
+            "--json",
+            "-E",
+            r#"builtins.toFile "source-transfer-trust-control.yaml" "enabled: true\nmode: untrusted-ca\n""#,
+        ]))
+        .stdout,
+    )
+    .unwrap();
+    let source = Source::read(&s, input.clone());
+    assert!(source.info["ca"].as_str().unwrap().starts_with("text:sha256:"));
+    let control = Fixture {
+        expected: b"enabled: true\nmode: untrusted-ca\n".to_vec(),
+        consumer_body: plain_consumer(&input),
+        input,
+        sources: vec![source],
+        forbidden: Vec::new(),
+        output_refs: Vec::new(),
+    };
+    let ca_consumer = control.consumer(&s, "source-transfer-trust-control-consumer");
+    assert!(!valid(&s, &control.input, Some(&b)));
+    let accepted = ok(s
+        .iets()
+        .env("PATH", &path)
+        .args(["build", "--builder", url, "--impure", "--no-tracing-cache"])
+        .arg(&ca_consumer.file));
+    ca_consumer.assert_result(&s, &b, &control, &accepted);
+
+    assert!(!valid(&s, &fixture.input, Some(&b)));
+    assert!(!valid(&s, &consumer.drv, Some(&b)));
+    assert!(!valid(&s, &consumer.out, Some(&b)));
+    let rejected = s
+        .iets()
+        .env("PATH", &path)
+        .args(["build", "--builder", url, "--impure", "--no-tracing-cache"])
+        .arg(&consumer.file)
+        .output()
+        .unwrap();
+    assert!(
+        !rejected.status.success(),
+        "an untrusted connection must not import an unsigned IA source: {}",
+        e2e::stderr(&rejected)
+    );
+    assert!(!valid(&s, &fixture.input, Some(&b)));
+    assert!(!valid(&s, &consumer.out, Some(&b)));
+
+    let jobs = s.write(
+        "untrusted-jobs.nix",
+        &format!("{{ consumer = import {}; }}\n", consumer.file.display()),
+    );
+    let rejected = s
+        .iets()
+        .env("PATH", &path)
+        .args(["eval-jobs", "--eval-store", url, "--workers", "1", "--impure"])
+        .arg(jobs)
+        .output()
+        .unwrap();
+    assert!(
+        !rejected.status.success(),
+        "streamed uploads must retain the same import trust boundary: {}",
+        e2e::stderr(&rejected)
+    );
+    assert!(!valid(&s, &fixture.input, Some(&b)));
+    assert!(!valid(&s, &consumer.out, Some(&b)));
+
+    // Only the connection's existing trust differs: the very same store,
+    // signature policy, IA metadata and consumer succeed for a trusted peer.
     consumer.build(&s, &b, &fixture);
 }
