@@ -1182,6 +1182,141 @@ fn pinned_submodules_use_selected_commit_mappings() {
 }
 
 #[test]
+fn submodule_paths_normalize_and_keep_first_configuration_value() {
+    let Some(f) = F::new() else { return };
+    let leaf = f.work().join("path-leaf");
+    write(&leaf.join("data"), "nested");
+    git(&leaf, &["init", "-q"]);
+    git(&leaf, &["add", "-A"]);
+    git(&leaf, &["commit", "-qm", "leaf"]);
+    let child = f.work().join("path-child");
+    write(&child.join("data"), "selected child");
+    git(&child, &["init", "-q"]);
+    git(
+        &child,
+        &[
+            "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+            leaf.to_str().unwrap(), "nested",
+        ],
+    );
+    git(
+        &child,
+        &["config", "--file", ".gitmodules", "submodule.nested.path", "./nested"],
+    );
+    git(&child, &["add", "-A"]);
+    git(&child, &["commit", "-qm", "normalized nested mapping"]);
+    let repo = f.work().join("path-root");
+    let flake = r#"{
+      inputs.self.submodules = true;
+      outputs = { self }: {
+        v = builtins.toJSON {
+          info = removeAttrs self.sourceInfo [ "outPath" ];
+          source = self.outPath;
+          a = builtins.readFile (self + "/a/data");
+          nested = builtins.readFile (self + "/a/nested/data");
+          bDirectory = builtins.pathExists (self + "/b");
+          bEntries = if builtins.pathExists (self + "/b")
+            then builtins.attrNames (builtins.readDir (self + "/b")) else null;
+          bVisible = builtins.pathExists (self + "/b/data");
+          drv = (derivation { name = "normalized-mapping-source"; system = "x86_64-linux";
+            builder = "/bin/sh"; source = self; }).drvPath;
+        };
+      };
+    }"#;
+    write(&repo.join("flake.nix"), flake);
+    git(&repo, &["init", "-q"]);
+    for path in ["a", "b"] {
+        git(
+            &repo,
+            &[
+                "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                child.to_str().unwrap(), path,
+            ],
+        );
+    }
+    git(
+        &repo,
+        &["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
+    );
+    let git_bin = f.work().join("git-only");
+    mkdir(&git_bin);
+    symlink(e2e::resolved("git"), git_bin.join("git")).unwrap();
+    let no_nix = f.s.no_nix();
+    let env = [
+        ("PATH", git_bin.to_str().unwrap()),
+        ("IETS_NIX_BIN_DIR", no_nix.to_str().unwrap()),
+        ("IETS_CACHE", "0"),
+    ];
+    for (path, distinct) in [("./a", false), ("prefix/../a//./", false), ("./a", true)] {
+        let second = if distinct { "[submodule \"Selected\"]\n" } else { "" };
+        write(
+            &repo.join(".gitmodules"),
+            &format!(
+                "[submodule \"selected\"]\npath = {path}\nurl = {}\n{second}path = ./b\nurl = {}\n",
+                child.display(), child.display()
+            ),
+        );
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "configured normalized mounts"]);
+        let rev = stdout(&git(&repo, &["rev-parse", "HEAD"]));
+        // Keep the parent dirty so the unpinned case exercises workdir
+        // parsing as well as the selected revision's committed parser.
+        write(&repo.join("flake.nix"), &(flake.to_owned() + "\n# working tree\n"));
+        for pinned in [false, true] {
+            let r = if pinned {
+                format!("git+file://{}?rev={}#v", repo.display(), rev.trim())
+            } else {
+                format!("{}#v", repo.display())
+            };
+            let native = f.iets_eval(&env, &["--raw", "--no-cache", "--pure-eval", &r]);
+            let oracle = f.nix_eval(&r);
+            assert!(native.status.success(), "{}", stderr(&native));
+            assert!(oracle.status.success(), "{}", stderr(&oracle));
+            assert_eq!(native.stdout, oracle.stdout, "path={path}, pinned={pinned}");
+            let value: Value = serde_json::from_str(&stdout(&native)).unwrap();
+            assert_eq!(value["a"], "selected child");
+            assert_eq!(value["nested"], "nested");
+            assert_eq!(value["bVisible"], distinct);
+            if pinned || distinct {
+                assert_eq!(value["bDirectory"], true);
+            }
+            if pinned && !distinct {
+                assert_eq!(value["bEntries"], json!([]));
+            }
+            assert_eq!(value["info"]["submodules"], true);
+            if pinned {
+                assert_eq!(value["info"]["rev"], rev.trim());
+            } else {
+                assert!(value["info"].get("rev").is_none());
+            }
+            assert_eq!(
+                value["info"]["narHash"],
+                f.nar_hash(value["source"].as_str().unwrap())
+            );
+        }
+        write(&repo.join("flake.nix"), flake);
+    }
+    for path in ["../path-child", "a/../../path-child"] {
+        write(
+            &repo.join(".gitmodules"),
+            &format!("[submodule \"escape\"]\npath = {path}\nurl = {}\n", child.display()),
+        );
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "escaping mapping"]);
+        let rev = stdout(&git(&repo, &["rev-parse", "HEAD"]));
+        write(&repo.join("flake.nix"), &(flake.to_owned() + "\n# working tree\n"));
+        for r in [
+            format!("{}#v", repo.display()),
+            format!("git+file://{}?rev={}#v", repo.display(), rev.trim()),
+        ] {
+            let native = f.iets_eval(&env, &["--raw", "--no-cache", "--pure-eval", &r]);
+            assert!(!native.status.success(), "escaping mapping {path} was accepted");
+        }
+        write(&repo.join("flake.nix"), flake);
+    }
+}
+
+#[test]
 fn root_self_settings_reject_deferred_values() {
     let Some(f) = F::new() else { return };
     let repo = f.work().join("settings-import-root");

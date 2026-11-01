@@ -269,19 +269,36 @@ fn submodule_paths(trace: &Trace, root: &Path) -> Result<Vec<PathBuf>, String> {
 
 fn parse_submodule_paths(out: &[u8]) -> Result<Vec<PathBuf>, String> {
     let mut paths = Vec::new();
+    let mut keys = HashSet::new();
     for entry in out.split(|&b| b == 0).filter(|e| !e.is_empty()) {
         let Some(nl) = entry.iter().position(|&b| b == b'\n') else {
             return Err("iets: invalid Git submodule path record".into());
         };
-        let path = Path::new(OsStr::from_bytes(&entry[nl + 1..]));
-        if path.as_os_str().is_empty()
-            || path
-                .components()
-                .any(|c| !matches!(c, std::path::Component::Normal(_)))
-        {
-            return Err(format!("iets: invalid submodule path '{}'", path.display()));
+        // Nix keeps the first value for each configuration key, preserving
+        // subsection identity before converting its value to a mountpoint.
+        if !keys.insert(&entry[..nl]) {
+            continue;
         }
-        paths.push(path.to_path_buf());
+        let path = Path::new(OsStr::from_bytes(&entry[nl + 1..]));
+        let invalid = || format!("iets: invalid submodule path '{}'", path.display());
+        let mut depth = 0usize;
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(_) => depth += 1,
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    depth = depth.checked_sub(1).ok_or_else(invalid)?;
+                }
+                _ => return Err(invalid()),
+            }
+        }
+        if depth == 0 {
+            return Err(invalid());
+        }
+        // CanonPath is lexical: a cancelled component must never cause a
+        // lookup through a checkout symlink (or require the component to exist).
+        let canonical = crate::compile::canon_path(path.as_os_str().as_bytes());
+        paths.push(PathBuf::from(OsStr::from_bytes(&canonical[1..])));
     }
     Ok(paths)
 }
@@ -655,6 +672,28 @@ mod tests {
     use rstest::rstest;
 
     use std::fs;
+
+    #[test]
+    fn submodule_paths_normalize_inside_root_components() {
+        let paths = super::parse_submodule_paths(
+            b"submodule.child.path\n./child\0submodule.nested.path\nprefix/../nested//./leaf/\0",
+        )
+        .unwrap();
+        assert_eq!(paths, [std::path::PathBuf::from("child"), "nested/leaf".into()]);
+        for path in ["", ".", "child/..", "../child", "child/../../escape", "/child"] {
+            let record = format!("submodule.child.path\n{path}\0");
+            assert!(super::parse_submodule_paths(record.as_bytes()).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn submodule_paths_keep_first_value_per_configuration_key() {
+        let paths = super::parse_submodule_paths(
+            b"submodule.child.path\n./a\0submodule.child.path\nb\0submodule.child.path\n../ignored\0submodule.Child.path\n./b\0",
+        )
+        .unwrap();
+        assert_eq!(paths, [std::path::PathBuf::from("a"), "b".into()]);
+    }
 
     #[rstest]
     fn a_directory_in_a_repository_is_found(#[from(tree)] d: Tree) {
