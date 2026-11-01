@@ -1021,9 +1021,11 @@ impl Evaluator {
             Ok(true) => {
                 p.extend_from_slice(b"/default.nix");
                 let (resolved, at) =
-                    store_hooks::located(self, p, store_hooks::Follow::Full, pos)?;
-                p = resolved;
-                store_hooks::check(self, at, &p, store_hooks::Follow::Full, pos)?;
+                    store_hooks::located(self, p.clone(), store_hooks::Follow::Full, pos)?;
+                // Nix appends default.nix after resolving the directory. Check
+                // its target's visibility, but retain that directory as the
+                // relative-import base even when default.nix is a symlink.
+                store_hooks::check(self, at, &resolved, store_hooks::Follow::Full, pos)?;
             }
             Ok(false) => {}
             Err(e) => bail!(

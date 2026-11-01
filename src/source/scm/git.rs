@@ -243,13 +243,23 @@ fn submodule_paths(trace: &Trace, root: &Path) -> Result<Vec<PathBuf>, String> {
     let (status, out) = run(
         &Trace::default(),
         root,
-        &["config", "--file", ".gitmodules", "--null", "--get-regexp", "^submodule\\..*\\.path$"],
+        &[
+            "config",
+            "--file",
+            ".gitmodules",
+            "--null",
+            "--get-regexp",
+            "^submodule\\..*\\.path$",
+        ],
     )?;
     if status == 1 {
         return Ok(Vec::new());
     }
     if status != 0 {
-        return Err(format!("iets: cannot read submodule paths in '{}/.gitmodules'", root.display()));
+        return Err(format!(
+            "iets: cannot read submodule paths in '{}/.gitmodules'",
+            root.display()
+        ));
     }
     let mut paths = Vec::new();
     for entry in out.split(|&b| b == 0).filter(|e| !e.is_empty()) {
@@ -258,7 +268,9 @@ fn submodule_paths(trace: &Trace, root: &Path) -> Result<Vec<PathBuf>, String> {
         };
         let path = Path::new(OsStr::from_bytes(&entry[nl + 1..]));
         if path.as_os_str().is_empty()
-            || path.components().any(|c| !matches!(c, std::path::Component::Normal(_)))
+            || path
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
         {
             return Err(format!("iets: invalid submodule path '{}'", path.display()));
         }
@@ -269,12 +281,18 @@ fn submodule_paths(trace: &Trace, root: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 fn initialized_submodule(trace: &Trace, root: &Path, path: &Path) -> Result<PathBuf, String> {
-    let uninitialized = || format!(
-        "iets: submodule '{}' is not initialized; run git submodule update --init --recursive",
-        path.display()
-    );
+    let uninitialized = || {
+        format!(
+            "iets: submodule '{}' is not initialized; run git submodule update --init --recursive",
+            path.display()
+        )
+    };
     let mut at = root.to_path_buf();
-    for component in path.strip_prefix(root).map_err(|_| uninitialized())?.components() {
+    for component in path
+        .strip_prefix(root)
+        .map_err(|_| uninitialized())?
+        .components()
+    {
         if !matches!(component, std::path::Component::Normal(_)) {
             return Err(uninitialized());
         }
@@ -293,7 +311,13 @@ fn initialized_submodule(trace: &Trace, root: &Path, path: &Path) -> Result<Path
 /// repository: every blob as it is stored, and initialized submodules at
 /// their gitlink revisions when enabled (empty directories otherwise).
 /// With `export`, no entry that `export-ignore` drops is included.
-fn tree_at(trace: &Trace, root: &Path, rev: &str, export: bool, submodules: bool) -> Result<Option<Commit>, String> {
+fn tree_at(
+    trace: &Trace,
+    root: &Path,
+    rev: &str,
+    export: bool,
+    submodules: bool,
+) -> Result<Option<Commit>, String> {
     if export && submodules {
         return Err("exportIgnore and submodules are not supported together yet".into());
     }
@@ -333,10 +357,14 @@ fn tree_at(trace: &Trace, root: &Path, rev: &str, export: bool, submodules: bool
     for (path, mode, oid) in listed {
         if mode == b"160000" {
             if submodules {
-                let child = initialized_submodule(trace, root, &root.join(OsStr::from_bytes(&path)))?;
+                let child =
+                    initialized_submodule(trace, root, &root.join(OsStr::from_bytes(&path)))?;
                 let rev = str::from_utf8(&oid).map_err(|e| e.to_string())?;
                 let Some(commit) = tree_at(trace, &child, rev, false, true)? else {
-                    return Err(format!("iets: submodule '{}' has no revision {rev}", child.display()));
+                    return Err(format!(
+                        "iets: submodule '{}' has no revision {rev}",
+                        child.display()
+                    ));
                 };
                 entries.push((path.clone(), Entry::Empty));
                 for (rel, entry) in commit.entries {
@@ -500,7 +528,13 @@ impl Scm for Git {
         tree_at(trace, root, rev, export, submodules)
     }
 
-    fn read_at(&self, _trace: &Trace, root: &Path, rev: &str, path: &str) -> Result<Vec<u8>, String> {
+    fn read_at(
+        &self,
+        _trace: &Trace,
+        root: &Path,
+        rev: &str,
+        path: &str,
+    ) -> Result<Vec<u8>, String> {
         // cat-file follows links within the revision, not on the host. Its
         // special response for a link outside the tree is rejected below.
         let input = format!("{rev}:{path}\n").into_bytes();
@@ -511,7 +545,9 @@ impl Scm for Git {
             let mut fields = out[..nl].split(|&b| b == b' ');
             let _oid = fields.next();
             if fields.next() == Some(b"blob".as_slice())
-                && let Some(size) = fields.next().and_then(|s| str::from_utf8(s).ok()?.parse::<usize>().ok())
+                && let Some(size) = fields
+                    .next()
+                    .and_then(|s| str::from_utf8(s).ok()?.parse::<usize>().ok())
                 && fields.next().is_none()
                 && let Some(end) = (nl + 1).checked_add(size).filter(|end| *end <= out.len())
             {
@@ -520,7 +556,10 @@ impl Scm for Git {
                 return Ok(out);
             }
         }
-        Err(format!("iets: cannot read '{path}' at revision {rev} in '{}'", root.display()))
+        Err(format!(
+            "iets: cannot read '{path}' at revision {rev} in '{}'",
+            root.display()
+        ))
     }
 
     fn rev_count(&self, root: &Path, rev: &str) -> Result<u64, String> {

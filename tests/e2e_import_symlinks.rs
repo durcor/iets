@@ -68,7 +68,11 @@ impl Fixture {
             "\"directory-target\"\n",
         )
         .unwrap();
-        symlink("../modules/default.nix", repo.join(".config/nixos/default.nix")).unwrap();
+        symlink(
+            "../modules/default.nix",
+            repo.join(".config/nixos/default.nix"),
+        )
+        .unwrap();
         symlink("../private.nix", repo.join("private-default/default.nix")).unwrap();
         fs::write(repo.join(".config/nixos/value.nix"), "\"target-one\"\n").unwrap();
         fs::write(
@@ -154,9 +158,13 @@ impl Fixture {
     }
 
     fn rejected(&self, attr: &str, reason: &str) {
+        self.rejected_with_reasons(attr, reason, reason);
+    }
+
+    fn rejected_with_reasons(&self, attr: &str, iets_reason: &str, nix_reason: &str) {
         let i = self.iets(attr, false);
         let n = self.nix(attr);
-        for (name, result) in [("iets", i), ("nix", n)] {
+        for (name, result, reason) in [("iets", i, iets_reason), ("nix", n, nix_reason)] {
             assert!(!result.status.success(), "{name} accepted {attr}");
             assert!(result.stdout.is_empty(), "{name} exposed {attr}");
             assert!(
@@ -174,7 +182,7 @@ fn tracked_ancestor_and_leaf_imports_match_nix() {
     for attr in ["ancestor", "leaf"] {
         f.parity(attr, "\"target-one\"", false);
     }
-    f.parity("directory", "\"directory-target\"", false);
+    f.parity("directory", "\"target-one\"", false);
     f.parity("scoped", "\"target-one-scoped\"", false);
     f.parity("identity", "true", false);
 }
@@ -182,7 +190,12 @@ fn tracked_ancestor_and_leaf_imports_match_nix() {
 #[test]
 fn import_links_preserve_source_visibility_and_purity() {
     let Some(f) = Fixture::new() else { return };
-    for attr in ["untracked", "untrackedDirectory", "untrackedDefault", "hiddenLink"] {
+    for attr in [
+        "untracked",
+        "untrackedDirectory",
+        "untrackedDefault",
+        "hiddenLink",
+    ] {
         f.rejected(attr, "not tracked by Git");
     }
     // Both targets exist in the checkout's host surroundings. Neither is
@@ -190,9 +203,17 @@ fn import_links_preserve_source_visibility_and_purity() {
     for attr in ["escape", "absolute"] {
         f.rejected(attr, "forbidden in pure evaluation mode");
     }
-    f.rejected("cycle", "infinite symlink recursion");
+    f.rejected_with_reasons(
+        "cycle",
+        "infinite symlink recursion",
+        "too many symbolic links",
+    );
     f.parity("danglingExists", "true", false);
-    f.rejected("danglingImport", "No such file or directory");
+    f.rejected_with_reasons(
+        "danglingImport",
+        "No such file or directory",
+        "does not exist in Git repository",
+    );
 }
 
 #[test]
@@ -204,7 +225,11 @@ fn cached_imports_follow_target_edits_retargets_and_tracking_changes() {
 
     fs::write(f.repo.join(".config/nixos/value.nix"), "\"target-two\"\n").unwrap();
     let edited = f.parity("leaf", "\"target-two\"", true);
-    assert!(!stderr(&edited).contains("cache: hit"), "{}", stderr(&edited));
+    assert!(
+        !stderr(&edited).contains("cache: hit"),
+        "{}",
+        stderr(&edited)
+    );
 
     fs::remove_file(f.repo.join("aliases/module.nix")).unwrap();
     symlink("value.nix", f.repo.join("aliases/module.nix")).unwrap();

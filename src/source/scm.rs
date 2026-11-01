@@ -121,7 +121,13 @@ pub trait Scm: Sync {
 
     /// Read one file of a revision before copying its tree, so root-source
     /// settings can be checked before assembling the source.
-    fn read_at(&self, trace: &Trace, root: &Path, rev: &str, path: &str) -> Result<Vec<u8>, String> {
+    fn read_at(
+        &self,
+        trace: &Trace,
+        root: &Path,
+        rev: &str,
+        path: &str,
+    ) -> Result<Vec<u8>, String> {
         let commit = self.tree_at(trace, root, rev, false, false)?;
         commit
             .and_then(|c| c.entries.into_iter().find(|(p, _)| p == path.as_bytes()))
@@ -129,7 +135,12 @@ pub trait Scm: Sync {
                 Entry::File { bytes, .. } => Some(bytes),
                 _ => None,
             })
-            .ok_or_else(|| format!("iets: cannot read '{path}' at revision {rev} in '{}'", root.display()))
+            .ok_or_else(|| {
+                format!(
+                    "iets: cannot read '{path}' at revision {rev} in '{}'",
+                    root.display()
+                )
+            })
     }
 
     /// For `rel`, a file on disk below `root` that the SCM does not track:

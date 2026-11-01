@@ -101,7 +101,13 @@ tracing cache checks again. git is its only implementation.
 
 For a git working tree, the tree is the set of index entries that still
 exist in the working tree, with the working tree's contents and modes.
-Untracked files, `.git` and submodules are excluded. `git` supplies the
+Untracked files and `.git` are excluded. Submodule contents are excluded by
+default. `inputs.self.submodules = true` includes initialized submodules
+recursively. This is a source setting, not an input to lock. As in Nix,
+applying self source settings refetches a clean parent at its resolved
+revision, using committed gitlinks; an independently dirty parent retains
+its working tree. The [flake reference](../reference/flakes.md#root-source-settings)
+describes that distinction and the initialization limits. `git` supplies the
 tree before the evaluation starts: `ls-files --stage -v` and
 `status --porcelain -uno` give the file set and the dirty flag, and
 `rev-parse HEAD` and `log -1 --format=%ct` give the revision and its date.
@@ -160,8 +166,8 @@ evaluation's allow list:
   for Nix;
 - a link out of the copy becomes another absolute path, which a pure
   evaluation refuses with `access to absolute path '...' is forbidden`;
-- a tracked link to a tracked directory is followed, and `readFile`,
-  `readDir` and `pathExists` see the directory.
+- a tracked link to a tracked directory is followed, and `import`,
+  `readFile`, `readDir` and `pathExists` see the directory.
 
 `readFile`, `readDir`, `hashFile` and `builtins.path` resolve every
 component, `pathExists` every component but the last, and `readFileType`
@@ -170,6 +176,12 @@ evaluation a path in the project is resolved the same way, and a link that
 leaves the project is refused
 ([Pure evaluation and local sources](pure-eval-and-local-sources.md)). Any
 other path is left to the kernel.
+
+A direct file import uses the resolved target as its cache identity and
+relative-import base. A directory import resolves the directory first and
+then appends `default.nix`: its target is checked for visibility without
+changing that directory's relative-import base. Thus even a symlinked
+`default.nix` behaves like Nix, without bypassing the virtual-tree filter.
 
 A flake directory that is itself a symlink to a working tree is that
 working tree: `git.cc` opens the repository, which resolves the path. An

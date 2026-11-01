@@ -343,7 +343,10 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let c = Ledger.tree_at(&trace, &root, "r3", true, false).unwrap().unwrap();
+        let c = Ledger
+            .tree_at(&trace, &root, "r3", true, false)
+            .unwrap()
+            .unwrap();
         assert_eq!((c.rev.as_str(), c.last_modified), ("r3", 1600000000));
         let files: Vec<(&[u8], &[u8])> = c
             .entries

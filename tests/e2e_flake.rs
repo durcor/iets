@@ -604,15 +604,25 @@ fn root_self_settings_without_dependencies() {
     f.check_fresh("self settings without flake.lock", &r);
     assert!(!repo.join("flake.lock").exists());
     let source = fs::read_to_string(repo.join("flake.nix")).unwrap();
-    write(&repo.join("flake.nix"), &source.replace("submodules = true", "submodules = false"));
+    write(
+        &repo.join("flake.nix"),
+        &source.replace("submodules = true", "submodules = false"),
+    );
     git(&repo, &["commit", "-q", "-am", "disabled self settings"]);
     f.check_fresh("disabled self settings without flake.lock", &r);
     assert!(!repo.join("flake.lock").exists());
-    write(&repo.join("flake.nix"), &source.replace("submodules = true", "submodules = \"true\""));
+    write(
+        &repo.join("flake.nix"),
+        &source.replace("submodules = true", "submodules = \"true\""),
+    );
     let n = f.nix_eval(&r);
     let i = f.iets_eval(&[], &["--raw", "--no-cache", &r]);
     f.verdict(!n.status.success() && !i.status.success(), || {
-        format!("submodules must be a Boolean: {} / {}", stderr(&n), stderr(&i))
+        format!(
+            "submodules must be a Boolean: {} / {}",
+            stderr(&n),
+            stderr(&i)
+        )
     });
 
     // Excluding self must not hide genuine implicit dependencies.
@@ -632,7 +642,8 @@ const SUBMODULES: &str = r#"{
   @INPUT@
   outputs = { self, ... }@inputs: {
     v = builtins.toJSON {
-      info = self.sourceInfo;
+      info = removeAttrs self.sourceInfo [ "outPath" ];
+      source = self.outPath;
       visible = builtins.pathExists (self + "/src/nh/flake.nix");
       hidden = builtins.pathExists (self + "/src/nh/untracked");
       git = builtins.pathExists (self + "/src/nh/.git");
@@ -676,7 +687,18 @@ fn git_submodules_are_root_source_settings() {
     fs::set_permissions(origin.join("executable"), fs::Permissions::from_mode(0o755)).unwrap();
     symlink("data", origin.join("link")).unwrap();
     git(&origin, &["init", "-q"]);
-    git(&origin, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", nested.to_str().unwrap(), "nested"]);
+    git(
+        &origin,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            nested.to_str().unwrap(),
+            "nested",
+        ],
+    );
     git(&origin, &["add", "-A"]);
     git(&origin, &["commit", "-q", "-m", "module"]);
 
@@ -684,12 +706,40 @@ fn git_submodules_are_root_source_settings() {
     let flake = |enabled: bool, input: bool| {
         SUBMODULES
             .replace("@ENABLED@", if enabled { "true" } else { "false" })
-            .replace("@INPUT@", if input { "inputs.nh.url = \"path:./src/nh\";" } else { "" })
+            .replace(
+                "@INPUT@",
+                if input {
+                    "inputs.nh.url = \"path:./src/nh\";"
+                } else {
+                    ""
+                },
+            )
     };
     write(&repo.join("flake.nix"), &flake(true, false));
     git(&repo, &["init", "-q"]);
-    git(&repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", origin.to_str().unwrap(), "src/nh"]);
-    git(&repo, &["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            origin.to_str().unwrap(),
+            "src/nh",
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
+    );
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-q", "-m", "root"]);
     let r = format!("{}#v", repo.display());
@@ -711,16 +761,26 @@ fn git_submodules_are_root_source_settings() {
     let native = f.iets_eval(&env, &["--raw", "--no-cache", "--pure-eval", &r]);
     let oracle = f.nix_eval(&r);
     let clean: Value = serde_json::from_str(&stdout(&oracle)).unwrap();
-    f.verdict(native.status.success() && oracle.status.success() && native.stdout == oracle.stdout, || {
-        format!("native submodules: {} / {}", stderr(&native), stderr(&oracle))
-    });
+    f.verdict(
+        native.status.success() && oracle.status.success() && native.stdout == oracle.stdout,
+        || {
+            format!(
+                "native submodules: {} / {}",
+                stderr(&native),
+                stderr(&oracle)
+            )
+        },
+    );
     assert_eq!(clean["visible"], true);
     assert_eq!(clean["content"], "module one");
     assert_eq!(clean["nested"], "nested one");
     assert_eq!(clean["info"]["submodules"], true);
     assert!(clean["info"]["rev"].is_string());
     assert!(clean["info"]["revCount"].is_number());
-    assert_eq!(clean["info"]["narHash"], f.nar_hash(clean["info"]["outPath"].as_str().unwrap()));
+    assert_eq!(
+        clean["info"]["narHash"],
+        f.nar_hash(clean["source"].as_str().unwrap())
+    );
     assert!(!repo.join("flake.lock").exists());
     f.check("submodule deterministic derivation", &drv, &[]);
     let rev = stdout(&git(&repo, &["rev-parse", "HEAD"]));
@@ -729,23 +789,70 @@ fn git_submodules_are_root_source_settings() {
 
     write(&module.join("untracked"), "must stay hidden");
     write(&repo.join("untracked"), "also hidden");
-    f.check("untracked submodule files do not affect source hash or metadata", &r, &[]);
+    f.check(
+        "untracked submodule files do not affect source hash or metadata",
+        &r,
+        &[],
+    );
     let untracked = f.iets_eval(&[], &["--raw", "--pure-eval", &r]);
     assert_eq!(untracked.stdout, oracle.stdout);
     assert_eq!(clean["hidden"], false);
     assert_eq!(clean["git"], false);
     assert_eq!(clean["rootHidden"], false);
     let hit = f.cache_lines(&r);
-    f.verdict(hit.contains("cache: hit"), || format!("submodule cache warmup: {hit}"));
+    f.verdict(hit.contains("cache: hit"), || {
+        format!("submodule cache warmup: {hit}")
+    });
+
+    // A clean parent is resolved to its revision before Nix applies self
+    // settings. Neither dirty child bytes nor moved child HEADs change it.
+    write(&module.join("data"), "ignored child edit");
+    write(&child.join("data"), "ignored nested edit");
+    f.check(
+        "clean parent pins dirty child and nested worktrees",
+        &r,
+        &[],
+    );
+    let ignored = f.iets_eval(&[], &["--raw", &r]);
+    assert_eq!(ignored.stdout, oracle.stdout);
+    git(&module, &["commit", "-q", "-am", "move child HEAD"]);
+    f.check("clean parent pins moved child HEAD", &r, &[]);
+    let moved = f.iets_eval(&[], &["--raw", "--no-cache", &r]);
+    assert_eq!(moved.stdout, oracle.stdout);
+
+    // An independently dirty parent retains its working tree on refetch.
+    // Exercise child-only cache invalidation without changing that parent.
+    write(
+        &repo.join("flake.nix"),
+        &(flake(true, false) + "\n# dirty parent\n"),
+    );
+    write(&child.join("data"), "nested one");
+    f.check("dirty parent includes current child worktrees", &r, &[]);
+    let warm = f.iets_eval(&[], &["--raw", &r]);
+    assert!(warm.status.success(), "{}", stderr(&warm));
+    let hit = f.cache_lines(&r);
+    f.verdict(hit.contains("cache: hit"), || {
+        format!("dirty parent cache warmup: {hit}")
+    });
 
     for contents in ["module dirty one", "module dirty two"] {
         write(&module.join("data"), contents);
         let i = f.iets_eval(&[], &["--raw", "--timings", "--pure-eval", &r]);
         let n = f.nix_eval(&r);
         let value: Value = serde_json::from_str(&stdout(&i)).unwrap();
-        f.verdict(i.status.success() && n.status.success() && i.stdout == n.stdout && stderr(&i).contains("miss ("), || {
-            format!("submodule cache invalidates: {} / {}", stderr(&i), stderr(&n))
-        });
+        f.verdict(
+            i.status.success()
+                && n.status.success()
+                && i.stdout == n.stdout
+                && stderr(&i).contains("miss ("),
+            || {
+                format!(
+                    "submodule cache invalidates: {} / {}",
+                    stderr(&i),
+                    stderr(&n)
+                )
+            },
+        );
         assert_eq!(value["content"], contents);
         assert_ne!(value["info"]["narHash"], clean["info"]["narHash"]);
         assert!(value["info"].get("rev").is_none());
@@ -755,17 +862,30 @@ fn git_submodules_are_root_source_settings() {
         f.check("dirty submodule uncached", &r, &[]);
     }
     git(&module, &["commit", "-q", "-am", "module changed"]);
-    f.check("clean changed submodule HEAD does not dirty parent", &r, &[]);
+    f.check("changed submodule HEAD under dirty parent", &r, &[]);
     let advanced: Value = serde_json::from_str(&stdout(&f.iets_eval(&[], &["--raw", &r]))).unwrap();
-    assert_eq!(advanced["info"]["rev"], clean["info"]["rev"]);
-    assert_eq!(advanced["info"]["revCount"], clean["info"]["revCount"]);
+    assert!(advanced["info"].get("rev").is_none());
+    assert!(advanced["info"].get("revCount").is_none());
+    assert_eq!(
+        advanced["info"]["dirtyRev"],
+        format!("{}-dirty", clean["info"]["rev"].as_str().unwrap())
+    );
     assert_ne!(advanced["info"]["narHash"], clean["info"]["narHash"]);
     write(&child.join("data"), "nested changed");
     let nested_dirty = f.iets_eval(&[], &["--raw", "--timings", &r]);
     let nested_oracle = f.nix_eval(&r);
-    f.verdict(nested_dirty.status.success() && nested_dirty.stdout == nested_oracle.stdout && stderr(&nested_dirty).contains("miss ("), || {
-        format!("nested submodule cache invalidation: {} / {}", stderr(&nested_dirty), stderr(&nested_oracle))
-    });
+    f.verdict(
+        nested_dirty.status.success()
+            && nested_dirty.stdout == nested_oracle.stdout
+            && stderr(&nested_dirty).contains("miss ("),
+        || {
+            format!(
+                "nested submodule cache invalidation: {} / {}",
+                stderr(&nested_dirty),
+                stderr(&nested_oracle)
+            )
+        },
+    );
     f.check("nested submodule dirties root and changes hash", &r, &[]);
     f.check("nested submodule changes derivation", &drv, &[]);
     f.check("pinned root ignores dirty child worktrees", &pinned, &[]);
@@ -796,12 +916,23 @@ fn git_submodules_are_root_source_settings() {
     assert!(locked.status.success(), "{}", stderr(&locked));
     git(&repo, &["add", "flake.nix", "flake.lock", "src/nh"]);
     git(&repo, &["commit", "-q", "-m", "relative path input"]);
-    f.check("relative path input through submodule, pure native root", &r, &[]);
+    write(
+        &repo.join("flake.nix"),
+        &(flake(true, true) + "\n# retain working submodule tree\n"),
+    );
+    f.check(
+        "relative path input through submodule, pure native root",
+        &r,
+        &[],
+    );
     let value: Value = serde_json::from_str(&stdout(&f.nix_eval(&r))).unwrap();
     assert_eq!(value["input"], "module dirty twonested changed");
     let pure = f.iets_eval(&env, &["--raw", "--no-cache", "--pure-eval", &r]);
     assert!(pure.status.success(), "{}", stderr(&pure));
-    assert_eq!(serde_json::from_str::<Value>(&stdout(&pure)).unwrap(), value);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&pure)).unwrap(),
+        value
+    );
 
     // Disabled sources must neither include nor observe child content.
     fs::remove_file(repo.join("flake.lock")).unwrap();
@@ -817,7 +948,11 @@ fn git_submodules_are_root_source_settings() {
     write(&child.join("data"), "nested ignored when disabled");
     let ignored = f.iets_eval(&[], &["--raw", &r]);
     assert_eq!(ignored.stdout, disabled.stdout);
-    f.check("disabled child edits leave root hash and metadata unchanged", &r, &[]);
+    f.check(
+        "disabled child edits leave root hash and metadata unchanged",
+        &r,
+        &[],
+    );
 }
 
 const COUNT: &str = r#"{

@@ -310,7 +310,12 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
     // inputs.self is metadata about this source, not a dependency to lock.
     let flake_path = fr.dir.join("flake.nix");
     let bytes = match &fr.source {
-        SourceRef::Commit { scm, root, rev, subdir } => {
+        SourceRef::Commit {
+            scm,
+            root,
+            rev,
+            subdir,
+        } => {
             let path = if subdir.is_empty() {
                 "flake.nix".to_string()
             } else {
@@ -319,7 +324,9 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
             scm.read_at(ev.trace(), root, rev, &path)
                 .map_err(|e| EvalError::boxed(ErrorKind::Io, e, pos))?
         }
-        _ => read_traced(ev, &flake_path)
+        // The final source tree records these bytes below. Do not add an
+        // earlier file observation that would replace its cache-miss reason.
+        _ => fs::read(&flake_path)
             .map_err(|e| EvalError::boxed(ErrorKind::Io, e.to_string(), pos))?,
     };
     // Nix requires source attributes to be trivial values. The actual flake
@@ -327,7 +334,33 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
     let ir = ev.compile_internal(&sys::path_to_internal(&flake_path), &bytes)?;
     let flake = ev.eval(ev.root_env, ir)?;
     let submodules = root_submodules(ev, flake, pos)?;
-    let root = source::tree(ev, &fr.source, submodules, pos)?;
+    // Nix resolves a clean root to its revision before applying self settings.
+    // Refetching with submodules therefore reads gitlink revisions, not child
+    // worktree edits. An already-dirty parent keeps its working-tree source.
+    let mut resolved_source = None;
+    if submodules.is_some()
+        && let SourceRef::Tracked { scm, root, subdir } = &fr.source
+    {
+        let initial = scm
+            .snapshot(ev.trace(), root, false)
+            .map_err(|e| EvalError::boxed(ErrorKind::Io, e, pos))?;
+        if !initial.dirty
+            && let Some(rev) = initial.rev
+        {
+            resolved_source = Some(SourceRef::Commit {
+                scm: *scm,
+                root: root.clone(),
+                rev,
+                subdir: subdir.clone(),
+            });
+        }
+    }
+    let root = source::tree(
+        ev,
+        resolved_source.as_ref().unwrap_or(&fr.source),
+        submodules.unwrap_or(false),
+        pos,
+    )?;
     let source_info = fetch::emit_tree_attrs(ev, &root, Some("self"), pos)?;
     let subdir = root.subdir;
     let out_path = {
@@ -544,14 +577,14 @@ pub fn select(ev: &mut Evaluator, mut v: Word, path: &[String]) -> EvalResult<Op
 
 /// Only inspect self settings here; dependency URLs and outputs must be
 /// evaluated against the final filtered source, not the host working tree.
-fn root_submodules(ev: &mut Evaluator, flake: Word, pos: Pos) -> EvalResult<bool> {
+fn root_submodules(ev: &mut Evaluator, flake: Word, pos: Pos) -> EvalResult<Option<bool>> {
     let attrs = ev.force_attrs(flake, pos, "while evaluating flake.nix")?;
     let Some(inputs) = attrs.get(ev.sym(b"inputs")) else {
-        return Ok(false);
+        return Ok(None);
     };
     let inputs = ev.force_attrs(inputs.cell.get(), pos, "while evaluating flake inputs")?;
     let Some(settings) = inputs.get(ev.sym(b"self")) else {
-        return Ok(false);
+        return Ok(None);
     };
     let settings = ev.force_attrs(settings.cell.get(), pos, "while evaluating 'inputs.self'")?;
     let submodules = ev.sym(b"submodules");
@@ -566,8 +599,14 @@ fn root_submodules(ev: &mut Evaluator, flake: Word, pos: Pos) -> EvalResult<bool
         ));
     }
     match settings.get(submodules) {
-        Some(a) => ev.force_bool(a.cell.get(), pos, "while evaluating 'inputs.self.submodules'"),
-        None => Ok(false),
+        Some(a) => ev
+            .force_bool(
+                a.cell.get(),
+                pos,
+                "while evaluating 'inputs.self.submodules'",
+            )
+            .map(Some),
+        None => Ok(None),
     }
 }
 

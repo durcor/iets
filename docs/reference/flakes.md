@@ -52,8 +52,8 @@ prints.
   `packages.<system>.` for you.
 - `flake.lock` must be complete: every node reachable from the root has a
   `narHash` or is a relative `path:` input, and every declared input has a
-  lock entry. The declared inputs are the names in `inputs` and the
-  arguments of `outputs` other than `self`. If not, you get
+  lock entry. The declared dependencies are the names in `inputs` and the
+  arguments of `outputs`, excluding `self` in both places. If not, you get
   `flake.lock missing or incomplete, run nix flake lock`.
   `--reference-lock-file PATH` reads the root flake's lock from `PATH`
   instead, under the same rules, and `PATH` must exist.
@@ -62,10 +62,42 @@ prints.
   (`inputs.b.inputs.c.follows`). A stale lock gives the same error, where
   Nix would lock again (`docs/reference/divergences.md`). An input with
   both a `url` and a `follows` is an error, as in Nix.
-- A flake that declares no inputs needs no `flake.lock`, as in Nix.
+- A flake that declares no dependencies needs no `flake.lock`, even when
+  it sets `inputs.self.submodules`, as in Nix.
 - `--strict`, `--json` and `--raw` work as they do with a file. `--raw`
   behaves like `nix eval --raw`: the value becomes a string without copying
   paths to the store.
+
+## Root source settings
+
+`inputs.self.submodules = true` configures the root Git source; `self` is
+not a dependency and needs no lock node. Initialized submodules, including
+nested ones, are included natively. Relative inputs such as
+`inputs.nh.url = "path:./src/nh"` read through that assembled source.
+Untracked files and `.git` remain invisible in every included worktree.
+`false`, or no setting, leaves submodule contents out. Other `inputs.self`
+source options are not supported.
+
+As in Nix 2.34.9, applying an explicit self source setting refetches the
+root. A parent that was clean before including submodules is already
+resolved to its commit: the refetch uses committed gitlinks, ignoring dirty
+child files and moved child HEADs. An independently dirty parent keeps its
+working tree, including tracked edits in initialized child worktrees. Its
+source hash and cached evaluation change when those files change; dirty
+children omit the root's clean revision/count metadata. `lastModified`
+remains the parent commit's date.
+
+Initialize submodules with `git submodule update --init --recursive`
+before evaluating: iets reports an initialization error rather than
+fetching missing modules. This support does not add remote root fetching,
+Git LFS processing, or `exportIgnore` together with submodules.
+
+Imports follow tracked ancestor and leaf symlinks within the virtual source
+before checking final visibility. Relative imports use a direct leaf link's
+target directory. A directory import appends `default.nix` after resolving
+the directory and retains that directory as its relative-import base, even
+if `default.nix` is itself a symlink. Untracked targets, escapes in pure
+evaluation, and cycles are still rejected.
 
 ## Flake references
 
@@ -266,7 +298,7 @@ source control system iets reads (`docs/explanation/flakes-and-sources.md`).
 
 | Source | What the tree is, and its metadata |
 |:---|:---|
-| git | the files in git's index that still exist in the working tree, with their working-tree contents and modes; untracked files, `.git` and submodules are left out. Clean: `rev`, `shortRev`, `revCount` (not in a shallow clone; deprecated, lint `rev-count`). Dirty: `dirtyRev`, `dirtyShortRev`. `submodules = false` always. `lastModified` is the time of the HEAD commit. iets counts `revCount` only when the evaluation reads it, and the tracing cache keeps the count per revision |
+| git | the files in git's index that still exist in the working tree, with their working-tree contents and modes; untracked files and `.git` are left out. Submodules follow the root source settings above. Clean: `rev`, `shortRev`, `revCount` (not in a shallow clone; deprecated, lint `rev-count`). Dirty: `dirtyRev`, `dirtyShortRev`. `lastModified` is the time of the HEAD commit. iets counts `revCount` only when the evaluation reads it, and the tracing cache keeps the count per revision |
 | path | the whole directory; `lastModified` is the newest `lstat` mtime in it |
 
 The store path is the fixed-output path of the tree's NAR hash, named

@@ -137,7 +137,10 @@ pub fn tracked_source(
     submodules: bool,
     pos: Pos,
 ) -> EvalResult<Tree> {
-    let options = CopyOptions { submodules, ..CopyOptions::default() };
+    let options = CopyOptions {
+        submodules,
+        ..CopyOptions::default()
+    };
     let (mut tree, _) = workdir(ev, scm, root, "source", options, pos)?;
     tree.subdir = subdir.to_string();
     Ok(tree)
@@ -156,7 +159,10 @@ pub fn commit_tree(
     options: CopyOptions,
     pos: Pos,
 ) -> EvalResult<Option<Tree>> {
-    let CopyOptions { export_ignore: export, submodules } = options;
+    let CopyOptions {
+        export_ignore: export,
+        submodules,
+    } = options;
     let commit = scm
         .tree_at(ev.trace(), root, rev, export, submodules)
         .map_err(|e| Error::boxed(ErrorKind::Io, e, pos))?;
@@ -197,7 +203,10 @@ pub fn commit_source(
     submodules: bool,
     pos: Pos,
 ) -> EvalResult<Tree> {
-    let options = CopyOptions { submodules, ..CopyOptions::default() };
+    let options = CopyOptions {
+        submodules,
+        ..CopyOptions::default()
+    };
     let Some(mut tree) = commit_tree(ev, scm, root, rev, "source", options, pos)? else {
         return Err(Error::boxed(
             ErrorKind::Io,
@@ -224,7 +233,10 @@ pub fn workdir(
     options: CopyOptions,
     pos: Pos,
 ) -> EvalResult<(Tree, bool)> {
-    let CopyOptions { export_ignore: export, submodules } = options;
+    let CopyOptions {
+        export_ignore: export,
+        submodules,
+    } = options;
     if export && submodules {
         return Err(Error::boxed(
             ErrorKind::Unsupported,

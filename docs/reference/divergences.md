@@ -406,15 +406,19 @@ nix. `fetchTarball` and `fetchTree` work for some inputs;
 - A download error has iets's own text, not curl's.
 
 `builtins.fetchGit` copies a local working tree without a `ref` or a `rev`
-itself. It also reads a commit of a local repository by `rev` or `ref`
-itself, without `submodules`. Every other fetch runs the real `nix`, which
-must be on `PATH`. It differs from Nix in these ways:
+itself, including initialized nested submodules when requested. It also
+reads a commit of a local repository by `rev` or `ref` itself, without
+`submodules`. Every other fetch runs the real `nix`, which must be on
+`PATH`. It differs from Nix in these ways:
 
 - On a cache hit, the `Git tree '…' is dirty` warning is not printed again.
 - When a fetch through nix fails, you see only nix's innermost error.
 - A shallow working tree with `shallow = false` goes to nix.
 - In pure evaluation, an SCP-like URL (`user@host:path`) without a `rev`
   fails.
+- Native submodule copying requires initialized worktrees and does not
+  fetch missing modules. Combining `exportIgnore` and `submodules` is not
+  supported.
 
 `builtins.fetchClosure` is not supported. In classic mode with the
 `fetch-closure` feature, the call falls back to the real nix.
@@ -490,14 +494,13 @@ experimental feature on.
 
 ## A root flake pinned by `rev`
 
-`git+file:///path?rev=SHA` is the tree of that commit, as it is in Nix
-(`docs/reference/flakes.md`). Its `flake.nix` and `flake.lock`, however,
-iets reads from the checkout at `/path`, not out of the commit: the lock
-decides what the evaluation fetches, so it is read before any tree is
-built. A checkout whose tracked `flake.nix` or `flake.lock` differs from
-the commit it is pinned to therefore evaluates against the files on disk,
-while Nix uses the commit's. CI pins a checkout to its own `HEAD`, where
-the two are the same file.
+`git+file:///path?rev=SHA` reads the source and its `flake.nix` from that
+commit, including committed gitlinks when `inputs.self.submodules` enables
+them, as in Nix (`docs/reference/flakes.md`). The `flake.lock`, however,
+is still read from the checkout at `/path`, before the source tree is
+built. A checkout whose lock differs from the pinned commit therefore
+evaluates with the lock on disk, while Nix uses the commit's. CI pins a
+checkout to its own `HEAD`, where the two are the same file.
 
 ## `--reference-lock-file`
 
