@@ -309,30 +309,25 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
     // Read the flake's source settings before hashing the tree. In particular,
     // inputs.self is metadata about this source, not a dependency to lock.
     let flake_path = fr.dir.join("flake.nix");
-    let bytes = match &fr.source {
-        SourceRef::Commit {
-            scm,
-            root,
-            rev,
-            subdir,
-        } => {
-            let path = if subdir.is_empty() {
-                "flake.nix".to_string()
-            } else {
-                format!("{subdir}/flake.nix")
-            };
-            scm.read_at(ev.trace(), root, rev, &path)
-                .map_err(|e| EvalError::boxed(ErrorKind::Io, e, pos))?
-        }
-        // The final source tree records these bytes below. Do not add an
-        // earlier file observation that would replace its cache-miss reason.
-        _ => fs::read(&flake_path)
-            .map_err(|e| EvalError::boxed(ErrorKind::Io, e.to_string(), pos))?,
-    };
-    // Nix requires source attributes to be trivial values. The actual flake
-    // is imported and linted below, through its filtered store tree.
-    let ir = ev.compile_internal(&sys::path_to_internal(&flake_path), &bytes)?;
-    let flake = ev.eval(ev.root_env, ir)?;
+    if !matches!(&fr.source, SourceRef::Commit { .. }) {
+        // Source selection depends on mutable checkout bytes even when the
+        // final source is an immutable commit (including assume-unchanged).
+        read_traced(ev, &flake_path)
+            .map_err(|e| EvalError::boxed(ErrorKind::Io, e.to_string(), pos))?;
+    }
+    // Settings are evaluated with the initial filtered source as their base,
+    // never with access to untracked host-only imports or symlink targets.
+    let initial_tree = source::tree(ev, &fr.source, false, pos)?;
+    let initial_info = fetch::emit_tree_attrs(ev, &initial_tree, Some("self"), pos)?;
+    let initial_attrs = ev.force_attrs(initial_info, pos, "while reading initial sourceInfo")?;
+    let initial_out = initial_attrs.get(ev.s.out_path).expect("sourceInfo outPath").cell.get();
+    let mut initial_path = ev.force_string(initial_out, pos, "while reading initial outPath")?.bytes.to_vec();
+    if !initial_tree.subdir.is_empty() {
+        initial_path.push(b'/');
+        initial_path.extend_from_slice(initial_tree.subdir.as_bytes());
+    }
+    initial_path.extend_from_slice(b"/flake.nix");
+    let flake = ev.eval_file(&initial_path, pos)?;
     let submodules = root_submodules(ev, flake, pos)?;
     // Nix resolves a clean root to its revision before applying self settings.
     // Refetching with submodules therefore reads gitlink revisions, not child
@@ -355,12 +350,16 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
             });
         }
     }
-    let root = source::tree(
-        ev,
-        resolved_source.as_ref().unwrap_or(&fr.source),
-        submodules.unwrap_or(false),
-        pos,
-    )?;
+    let root = if resolved_source.is_none() && !submodules.unwrap_or(false) {
+        initial_tree
+    } else {
+        source::tree(
+            ev,
+            resolved_source.as_ref().unwrap_or(&fr.source),
+            submodules.unwrap_or(false),
+            pos,
+        )?
+    };
     let source_info = fetch::emit_tree_attrs(ev, &root, Some("self"), pos)?;
     let subdir = root.subdir;
     let out_path = {
