@@ -981,8 +981,13 @@ impl Evaluator {
         if p.starts_with(CorePkgs::PREFIX) {
             return Ok(p);
         }
-        store_hooks::confine(self, &p, store_hooks::Follow::Full, pos)?;
-        let mut at = store_hooks::open(self, &p, pos)?;
+        // Walk the virtual tree before checking visibility: a tracked link
+        // may name a directory whose children exist only at its target path.
+        // Keep that store-relative target as both the import cache key and
+        // the base directory for relative paths in the imported expression.
+        let (resolved, at) = store_hooks::located(self, p, store_hooks::Follow::Full, pos)?;
+        p = resolved;
+        let mut at = store_hooks::check(self, at, &p, store_hooks::Follow::Full, pos)?;
         read_through_copy(self, &p, pos)?;
         // eval.cc:resolveExprPath follows a symlink on the last component,
         // so a relative path in the file resolves against the directory of
@@ -1013,7 +1018,13 @@ impl Evaluator {
             at = store_hooks::open(self, &p, pos)?;
         }
         match at.is_dir(self) {
-            Ok(true) => p.extend_from_slice(b"/default.nix"),
+            Ok(true) => {
+                p.extend_from_slice(b"/default.nix");
+                let (resolved, at) =
+                    store_hooks::located(self, p, store_hooks::Follow::Full, pos)?;
+                p = resolved;
+                store_hooks::check(self, at, &p, store_hooks::Follow::Full, pos)?;
+            }
             Ok(false) => {}
             Err(e) => bail!(
                 ErrorKind::Io,
