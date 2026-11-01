@@ -261,6 +261,13 @@ fn submodule_paths(trace: &Trace, root: &Path) -> Result<Vec<PathBuf>, String> {
             root.display()
         ));
     }
+    parse_submodule_paths(&out)?
+        .into_iter()
+        .map(|path| initialized_submodule(trace, root, &root.join(path)))
+        .collect()
+}
+
+fn parse_submodule_paths(out: &[u8]) -> Result<Vec<PathBuf>, String> {
     let mut paths = Vec::new();
     for entry in out.split(|&b| b == 0).filter(|e| !e.is_empty()) {
         let Some(nl) = entry.iter().position(|&b| b == b'\n') else {
@@ -274,8 +281,7 @@ fn submodule_paths(trace: &Trace, root: &Path) -> Result<Vec<PathBuf>, String> {
         {
             return Err(format!("iets: invalid submodule path '{}'", path.display()));
         }
-        let path = initialized_submodule(trace, root, &root.join(path))?;
-        paths.push(path);
+        paths.push(path.to_path_buf());
     }
     Ok(paths)
 }
@@ -339,6 +345,24 @@ fn tree_at(
         };
         listed.push((entry[tab + 1..].to_vec(), mode.to_vec(), oid.to_vec()));
     }
+    // Mount only gitlinks configured by this revision, never mappings from
+    // the mutable checkout. Unconfigured gitlinks remain empty directories.
+    let mounts: HashSet<PathBuf> = if submodules
+        && listed.iter().any(|(path, mode, _)| path == b".gitmodules" && mode != b"160000")
+    {
+        let blob = format!("{rev}:.gitmodules");
+        let (status, out) = run(
+            &quiet,
+            root,
+            &["config", "--blob", &blob, "--null", "--get-regexp", "^submodule\\..*\\.path$"],
+        )?;
+        if status != 0 && status != 1 {
+            return Err(format!("iets: cannot read submodule paths in '{blob}'"));
+        }
+        parse_submodule_paths(&out)?.into_iter().collect()
+    } else {
+        HashSet::new()
+    };
     let mut stdin = Vec::new();
     for (_, mode, oid) in &listed {
         if mode != b"160000" {
@@ -356,7 +380,7 @@ fn tree_at(
     let mut blobs = HashMap::new();
     for (path, mode, oid) in listed {
         if mode == b"160000" {
-            if submodules {
+            if submodules && mounts.contains(Path::new(OsStr::from_bytes(&path))) {
                 let child =
                     initialized_submodule(trace, root, &root.join(OsStr::from_bytes(&path)))?;
                 let rev = str::from_utf8(&oid).map_err(|e| e.to_string())?;

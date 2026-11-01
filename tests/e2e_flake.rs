@@ -955,6 +955,195 @@ fn git_submodules_are_root_source_settings() {
     );
 }
 
+// Preflight reads mutable checkout bytes even when the resulting source is
+// pinned. Git's assume-unchanged bit must not hide those dependencies.
+#[test]
+fn root_self_preflight_cache_tracks_checkout_bytes() {
+    let Some(f) = F::new() else { return };
+    let origin = f.work().join("preflight-child");
+    write(&origin.join("data"), "child");
+    git(&origin, &["init", "-q"]);
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-qm", "child"]);
+    let repo = f.work().join("preflight-root");
+    let flake = |setting: &str| format!(r#"{{
+      {setting}
+      outputs = {{ self }}: {{ v = builtins.toJSON {{
+        info = removeAttrs self.sourceInfo [ "outPath" ];
+        source = self.outPath;
+        visible = builtins.pathExists (self + "/child/data");
+      }}; }};
+    }}"#);
+    let disabled = flake("inputs.self.submodules = false;");
+    let enabled = flake("inputs.self.submodules = true;");
+    write(&repo.join("flake.nix"), &disabled);
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q",
+        origin.to_str().unwrap(), "child"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "root"]);
+    let r = format!("{}#v", repo.display());
+    // Establish this before populating the cache, so ls-files itself does
+    // not change when the Boolean changes.
+    git(&repo, &["update-index", "--assume-unchanged", "flake.nix"]);
+    let initial = f.iets_eval(&[], &["--raw", &r]);
+    assert!(initial.status.success(), "{}", stderr(&initial));
+    assert!(f.cache_lines(&r).contains("cache: hit"));
+    write(&repo.join("flake.nix"), &enabled);
+    assert!(stdout(&git(&repo, &["status", "--porcelain"])).is_empty());
+    let changed = f.iets_eval(&[], &["--raw", &r]);
+    let uncached = f.iets_eval(&[], &["--raw", "--no-cache", &r]);
+    assert!(changed.status.success(), "{}", stderr(&changed));
+    assert!(uncached.status.success(), "{}", stderr(&uncached));
+    assert_eq!(changed.stdout, uncached.stdout);
+    assert_ne!(changed.stdout, initial.stdout);
+    assert_eq!(serde_json::from_str::<Value>(&stdout(&changed)).unwrap()["visible"], true);
+    assert!(f.cache_lines(&r).contains("cache: hit"));
+    // Ordinary false/absent/true changes, dirty-to-clean and clean-to-dirty
+    // transitions use the same consumer-visible cache/no-cache contract.
+    git(&repo, &["update-index", "--no-assume-unchanged", "flake.nix"]);
+    for setting in ["", "inputs.self.submodules = false;", "inputs.self.submodules = true;"] {
+        write(&repo.join("flake.nix"), &flake(setting));
+        for clean in [false, true] {
+            if clean {
+                git(&repo, &["add", "flake.nix"]);
+                git(&repo, &["commit", "-qm", "settings transition"]);
+            }
+            let cached = f.iets_eval(&[], &["--raw", &r]);
+            let fresh = f.iets_eval(&[], &["--raw", "--no-cache", &r]);
+            assert!(cached.status.success(), "{}", stderr(&cached));
+            assert!(fresh.status.success(), "{}", stderr(&fresh));
+            assert_eq!(cached.stdout, fresh.stdout);
+            let value: Value = serde_json::from_str(&stdout(&cached)).unwrap();
+            assert_eq!(value["visible"], setting.contains("true"));
+            assert!(f.cache_lines(&r).contains("cache: hit"));
+        }
+    }
+}
+
+#[test]
+fn pinned_submodules_use_selected_commit_mappings() {
+    let Some(mut f) = F::new() else { return };
+    let leaf = f.work().join("mapping-leaf");
+    write(&leaf.join("data"), "nested");
+    git(&leaf, &["init", "-q"]);
+    git(&leaf, &["add", "-A"]);
+    git(&leaf, &["commit", "-qm", "leaf"]);
+    let child = f.work().join("mapping-child");
+    write(&child.join("data"), "child");
+    git(&child, &["init", "-q"]);
+    git(&child, &["-c", "protocol.file.allow=always", "submodule", "add", "-q",
+        leaf.to_str().unwrap(), "nested"]);
+    git(&child, &["add", "-A"]);
+    git(&child, &["commit", "-qm", "configured child"]);
+    let repo = f.work().join("mapping-root");
+    write(&repo.join("flake.nix"), r#"{
+      inputs.self.submodules = true;
+      outputs = { self }: {
+        v = builtins.toJSON {
+          info = removeAttrs self.sourceInfo [ "outPath" ];
+          source = self.outPath;
+          directory = builtins.pathExists (self + "/child");
+          visible = builtins.pathExists (self + "/child/data");
+          nested = builtins.pathExists (self + "/child/nested/data");
+        };
+        drv = (derivation { name = "mapping-source"; system = "x86_64-linux";
+          builder = "/bin/sh"; source = self; }).drvPath;
+      };
+    }"#);
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q",
+        child.to_str().unwrap(), "child"]);
+    git(&repo, &["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "configured root"]);
+    let configured = stdout(&git(&repo, &["rev-parse", "HEAD"]));
+    let mapping = fs::read(repo.join(".gitmodules")).unwrap();
+    // Remove the nested committed mapping, leaving its gitlink and local
+    // initialized checkout intact. Recursion must apply the same filter.
+    let mounted = repo.join("child");
+    fs::remove_file(mounted.join(".gitmodules")).unwrap();
+    git(&mounted, &["add", "-A"]);
+    git(&mounted, &["commit", "-qm", "remove nested mapping"]);
+    git(&repo, &["add", "child"]);
+    git(&repo, &["commit", "-qm", "update child"]);
+    let recursive = stdout(&git(&repo, &["rev-parse", "HEAD"]));
+    write(&repo.join(".gitmodules"), "# mapping removed, gitlink retained\n");
+    git(&repo, &["add", ".gitmodules"]);
+    git(&repo, &["commit", "-qm", "remove root mapping"]);
+    let removed = stdout(&git(&repo, &["rev-parse", "HEAD"]));
+    fs::remove_file(repo.join(".gitmodules")).unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "absent root mappings"]);
+    let absent = stdout(&git(&repo, &["rev-parse", "HEAD"]));
+    // Deliberately disagree with every selected commit: never consult the
+    // checkout's .gitmodules when deciding pinned visibility.
+    fs::write(repo.join(".gitmodules"), mapping).unwrap();
+    for (rev, visible, nested) in [
+        (configured, true, true), (recursive, true, false),
+        (removed, false, false), (absent, false, false),
+    ] {
+        let base = format!("git+file://{}?rev={}", repo.display(), rev.trim());
+        let r = format!("{base}#v");
+        let native = f.iets_eval(&[], &["--raw", "--no-cache", &r]);
+        let oracle = f.nix_eval(&r);
+        assert!(native.status.success(), "{}", stderr(&native));
+        assert!(oracle.status.success(), "{}", stderr(&oracle));
+        assert_eq!(native.stdout, oracle.stdout);
+        let value: Value = serde_json::from_str(&stdout(&native)).unwrap();
+        assert_eq!(value["directory"], true);
+        assert_eq!(value["visible"], visible);
+        assert_eq!(value["nested"], nested);
+        assert_eq!(value["info"]["rev"], rev.trim());
+        assert_eq!(value["info"]["submodules"], true);
+        assert_eq!(value["info"]["narHash"], f.nar_hash(value["source"].as_str().unwrap()));
+        f.check("committed mapping derivation parity", &format!("{base}#drv"), &[]);
+    }
+}
+
+#[test]
+fn root_self_settings_imports_use_filtered_source() {
+    let Some(f) = F::new() else { return };
+    let repo = f.work().join("settings-import-root");
+    write(&repo.join("flake.nix"), r#"{
+      inputs.self.submodules = import ./settings.nix;
+      outputs = { self }: { v = if self.submodules then "enabled" else "disabled"; };
+    }"#);
+    write(&repo.join("settings.nix"), "false");
+    git(&repo, &["init", "-q"]);
+    write(&repo.join("tracked"), "repository marker");
+    git(&repo, &["add", "tracked"]);
+    git(&repo, &["commit", "-qm", "untracked root flake"]);
+    let root_ref = format!("{}#v", repo.display());
+    let hidden_root = f.iets_eval(&[], &["--raw", "--no-cache", "--pure-eval", &root_ref]);
+    assert!(!hidden_root.status.success(), "root flake must be tracked");
+    git(&repo, &["add", "flake.nix"]);
+    git(&repo, &["commit", "-qm", "host-only settings"]);
+    let r = format!("{}#v", repo.display());
+    let hidden = f.iets_eval(&[], &["--raw", "--no-cache", "--pure-eval", &r]);
+    assert!(!hidden.status.success(), "untracked settings must not select a source");
+    // A tracked symlink cannot grant access to an untracked target either.
+    fs::rename(repo.join("settings.nix"), repo.join("host-only.nix")).unwrap();
+    symlink("host-only.nix", repo.join("settings.nix")).unwrap();
+    git(&repo, &["add", "settings.nix"]);
+    git(&repo, &["commit", "-qm", "tracked link to hidden settings"]);
+    let hidden_link = f.iets_eval(&[], &["--raw", "--no-cache", "--pure-eval", &r]);
+    assert!(!hidden_link.status.success(), "settings link must preserve visibility");
+    git(&repo, &["add", "host-only.nix"]);
+    git(&repo, &["commit", "-qm", "visible settings target"]);
+    let first = f.iets_eval(&[], &["--raw", "--pure-eval", &r]);
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert_eq!(stdout(&first), "disabled");
+    assert!(f.cache_lines(&r).contains("cache: hit"));
+    write(&repo.join("host-only.nix"), "true");
+    let changed = f.iets_eval(&[], &["--raw", "--pure-eval", &r]);
+    let fresh = f.iets_eval(&[], &["--raw", "--no-cache", "--pure-eval", &r]);
+    assert!(changed.status.success(), "{}", stderr(&changed));
+    assert!(fresh.status.success(), "{}", stderr(&fresh));
+    assert_eq!(changed.stdout, fresh.stdout);
+    assert_eq!(stdout(&changed), "enabled");
+}
+
 const COUNT: &str = r#"{
   inputs.reader.url = "path:@WORK@/reader";
   outputs = { self, reader }:

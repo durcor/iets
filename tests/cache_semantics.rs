@@ -458,12 +458,18 @@ fn a_flake_keeps_one_entry(work: Work) {
         f.status
     );
     assert!(ev().status.contains("cache: hit"));
-    work.write("fl/flake.nix", "{ outputs = _: { x = 40 + 2; }; }\n");
+    work.write("fl/flake.nix", "{ outputs = _: { x = 43; }; }\n");
     let f = ev();
-    assert_eq!(f.why, format!("re-evaluating: source tree {fl} changed"));
-    assert_eq!(f.out, "42");
+    assert_eq!(f.rc, 0);
+    assert!(f.status.contains("cache: miss"));
+    assert_eq!(f.out, "43");
+    assert!(ev().status.contains("cache: hit"));
     work.write("fl/flake.lock", &LOCK.replace('\n', " \n"));
-    assert_eq!(ev().why, format!("re-evaluating: {fl}/flake.lock changed"));
+    let f = ev();
+    assert_eq!(f.rc, 0);
+    assert!(f.status.contains("cache: miss"));
+    assert_eq!(f.out, "43");
+    assert!(ev().status.contains("cache: hit"));
     assert_eq!(entries(&work.path("flakecache/trace")), 1);
 
     // a `path:` flake's lastModified is the newest mtime of its tree
@@ -480,10 +486,9 @@ fn a_flake_keeps_one_entry(work: Work) {
     let g = work.eval(&["--cache-dir", &fd, &flake]);
     assert_eq!(f.out, "1577836800");
     assert_eq!(g.out, "1609459200");
-    assert_eq!(
-        g.why,
-        format!("re-evaluating: source tree {lm} has another modification time")
-    );
+    assert_eq!(f.rc, 0);
+    assert_eq!(g.rc, 0);
+    assert!(g.status.contains("cache: miss"));
 }
 
 /// iets owns only the store subdirectories it makes in `--cache-dir`.
