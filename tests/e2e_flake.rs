@@ -966,20 +966,34 @@ fn root_self_preflight_cache_tracks_checkout_bytes() {
     git(&origin, &["add", "-A"]);
     git(&origin, &["commit", "-qm", "child"]);
     let repo = f.work().join("preflight-root");
-    let flake = |setting: &str| format!(r#"{{
+    let flake = |setting: &str| {
+        format!(
+            r#"{{
       {setting}
       outputs = {{ self }}: {{ v = builtins.toJSON {{
         info = removeAttrs self.sourceInfo [ "outPath" ];
         source = self.outPath;
         visible = builtins.pathExists (self + "/child/data");
       }}; }};
-    }}"#);
+    }}"#
+        )
+    };
     let disabled = flake("inputs.self.submodules = false;");
     let enabled = flake("inputs.self.submodules = true;");
     write(&repo.join("flake.nix"), &disabled);
     git(&repo, &["init", "-q"]);
-    git(&repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q",
-        origin.to_str().unwrap(), "child"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            origin.to_str().unwrap(),
+            "child",
+        ],
+    );
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-qm", "root"]);
     let r = format!("{}#v", repo.display());
@@ -997,12 +1011,22 @@ fn root_self_preflight_cache_tracks_checkout_bytes() {
     assert!(uncached.status.success(), "{}", stderr(&uncached));
     assert_eq!(changed.stdout, uncached.stdout);
     assert_ne!(changed.stdout, initial.stdout);
-    assert_eq!(serde_json::from_str::<Value>(&stdout(&changed)).unwrap()["visible"], true);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&changed)).unwrap()["visible"],
+        true
+    );
     assert!(f.cache_lines(&r).contains("cache: hit"));
     // Ordinary false/absent/true changes, dirty-to-clean and clean-to-dirty
     // transitions use the same consumer-visible cache/no-cache contract.
-    git(&repo, &["update-index", "--no-assume-unchanged", "flake.nix"]);
-    for setting in ["", "inputs.self.submodules = false;", "inputs.self.submodules = true;"] {
+    git(
+        &repo,
+        &["update-index", "--no-assume-unchanged", "flake.nix"],
+    );
+    for setting in [
+        "",
+        "inputs.self.submodules = false;",
+        "inputs.self.submodules = true;",
+    ] {
         write(&repo.join("flake.nix"), &flake(setting));
         for clean in [false, true] {
             if clean {
@@ -1032,12 +1056,24 @@ fn pinned_submodules_use_selected_commit_mappings() {
     let child = f.work().join("mapping-child");
     write(&child.join("data"), "child");
     git(&child, &["init", "-q"]);
-    git(&child, &["-c", "protocol.file.allow=always", "submodule", "add", "-q",
-        leaf.to_str().unwrap(), "nested"]);
+    git(
+        &child,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            leaf.to_str().unwrap(),
+            "nested",
+        ],
+    );
     git(&child, &["add", "-A"]);
     git(&child, &["commit", "-qm", "configured child"]);
     let repo = f.work().join("mapping-root");
-    write(&repo.join("flake.nix"), r#"{
+    write(
+        &repo.join("flake.nix"),
+        r#"{
       inputs.self.submodules = true;
       outputs = { self }: {
         v = builtins.toJSON {
@@ -1050,11 +1086,32 @@ fn pinned_submodules_use_selected_commit_mappings() {
         drv = (derivation { name = "mapping-source"; system = "x86_64-linux";
           builder = "/bin/sh"; source = self; }).drvPath;
       };
-    }"#);
+    }"#,
+    );
     git(&repo, &["init", "-q"]);
-    git(&repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q",
-        child.to_str().unwrap(), "child"]);
-    git(&repo, &["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            child.to_str().unwrap(),
+            "child",
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
+    );
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-qm", "configured root"]);
     let configured = stdout(&git(&repo, &["rev-parse", "HEAD"]));
@@ -1065,10 +1122,24 @@ fn pinned_submodules_use_selected_commit_mappings() {
     fs::remove_file(mounted.join(".gitmodules")).unwrap();
     git(&mounted, &["add", "-A"]);
     git(&mounted, &["commit", "-qm", "remove nested mapping"]);
+    // Nix resolves the configured local origin URL, so make the selected
+    // child commit available there as well as in the initialized checkout.
+    git(
+        &mounted,
+        &[
+            "push",
+            "-q",
+            "origin",
+            "HEAD:refs/heads/without-nested-mapping",
+        ],
+    );
     git(&repo, &["add", "child"]);
     git(&repo, &["commit", "-qm", "update child"]);
     let recursive = stdout(&git(&repo, &["rev-parse", "HEAD"]));
-    write(&repo.join(".gitmodules"), "# mapping removed, gitlink retained\n");
+    write(
+        &repo.join(".gitmodules"),
+        "# mapping removed, gitlink retained\n",
+    );
     git(&repo, &["add", ".gitmodules"]);
     git(&repo, &["commit", "-qm", "remove root mapping"]);
     let removed = stdout(&git(&repo, &["rev-parse", "HEAD"]));
@@ -1080,8 +1151,10 @@ fn pinned_submodules_use_selected_commit_mappings() {
     // checkout's .gitmodules when deciding pinned visibility.
     fs::write(repo.join(".gitmodules"), mapping).unwrap();
     for (rev, visible, nested) in [
-        (configured, true, true), (recursive, true, false),
-        (removed, false, false), (absent, false, false),
+        (configured, true, true),
+        (recursive, true, false),
+        (removed, false, false),
+        (absent, false, false),
     ] {
         let base = format!("git+file://{}?rev={}", repo.display(), rev.trim());
         let r = format!("{base}#v");
@@ -1096,19 +1169,29 @@ fn pinned_submodules_use_selected_commit_mappings() {
         assert_eq!(value["nested"], nested);
         assert_eq!(value["info"]["rev"], rev.trim());
         assert_eq!(value["info"]["submodules"], true);
-        assert_eq!(value["info"]["narHash"], f.nar_hash(value["source"].as_str().unwrap()));
-        f.check("committed mapping derivation parity", &format!("{base}#drv"), &[]);
+        assert_eq!(
+            value["info"]["narHash"],
+            f.nar_hash(value["source"].as_str().unwrap())
+        );
+        f.check(
+            "committed mapping derivation parity",
+            &format!("{base}#drv"),
+            &[],
+        );
     }
 }
 
 #[test]
-fn root_self_settings_imports_use_filtered_source() {
+fn root_self_settings_reject_deferred_values() {
     let Some(f) = F::new() else { return };
     let repo = f.work().join("settings-import-root");
-    write(&repo.join("flake.nix"), r#"{
+    write(
+        &repo.join("flake.nix"),
+        r#"{
       inputs.self.submodules = import ./settings.nix;
       outputs = { self }: { v = if self.submodules then "enabled" else "disabled"; };
-    }"#);
+    }"#,
+    );
     write(&repo.join("settings.nix"), "false");
     git(&repo, &["init", "-q"]);
     write(&repo.join("tracked"), "repository marker");
@@ -1117,31 +1200,73 @@ fn root_self_settings_imports_use_filtered_source() {
     let root_ref = format!("{}#v", repo.display());
     let hidden_root = f.iets_eval(&[], &["--raw", "--no-cache", "--pure-eval", &root_ref]);
     assert!(!hidden_root.status.success(), "root flake must be tracked");
+    assert!(
+        !f.nix_eval(&root_ref).status.success(),
+        "Nix must reject an untracked root"
+    );
     git(&repo, &["add", "flake.nix"]);
     git(&repo, &["commit", "-qm", "host-only settings"]);
     let r = format!("{}#v", repo.display());
     let hidden = f.iets_eval(&[], &["--raw", "--no-cache", "--pure-eval", &r]);
-    assert!(!hidden.status.success(), "untracked settings must not select a source");
-    // A tracked symlink cannot grant access to an untracked target either.
+    assert!(
+        !hidden.status.success(),
+        "deferred settings must be rejected"
+    );
+    let oracle = f.nix_eval(&r);
+    assert!(
+        !oracle.status.success(),
+        "Nix must reject imported settings"
+    );
+    assert!(
+        stderr(&oracle).contains("is a thunk"),
+        "{}",
+        stderr(&oracle)
+    );
+    // Tracking a link or its target does not make a deferred option valid.
     fs::rename(repo.join("settings.nix"), repo.join("host-only.nix")).unwrap();
     symlink("host-only.nix", repo.join("settings.nix")).unwrap();
     git(&repo, &["add", "settings.nix"]);
     git(&repo, &["commit", "-qm", "tracked link to hidden settings"]);
     let hidden_link = f.iets_eval(&[], &["--raw", "--no-cache", "--pure-eval", &r]);
-    assert!(!hidden_link.status.success(), "settings link must preserve visibility");
+    assert!(
+        !hidden_link.status.success(),
+        "settings import must not be forced"
+    );
     git(&repo, &["add", "host-only.nix"]);
     git(&repo, &["commit", "-qm", "visible settings target"]);
-    let first = f.iets_eval(&[], &["--raw", "--pure-eval", &r]);
-    assert!(first.status.success(), "{}", stderr(&first));
-    assert_eq!(stdout(&first), "disabled");
-    assert!(f.cache_lines(&r).contains("cache: hit"));
-    write(&repo.join("host-only.nix"), "true");
-    let changed = f.iets_eval(&[], &["--raw", "--pure-eval", &r]);
-    let fresh = f.iets_eval(&[], &["--raw", "--no-cache", "--pure-eval", &r]);
-    assert!(changed.status.success(), "{}", stderr(&changed));
-    assert!(fresh.status.success(), "{}", stderr(&fresh));
-    assert_eq!(changed.stdout, fresh.stdout);
-    assert_eq!(stdout(&changed), "enabled");
+    let source = fs::read_to_string(repo.join("flake.nix")).unwrap();
+    for expression in [
+        "import ./settings.nix",
+        "(if true then true else false)",
+        "(let enabled = true; in enabled)",
+        "(builtins.fromJSON \"true\")",
+    ] {
+        write(
+            &repo.join("flake.nix"),
+            &source.replace("import ./settings.nix", expression),
+        );
+        let native = f.iets_eval(&[], &["--raw", "--no-cache", "--pure-eval", &r]);
+        let oracle = f.nix_eval(&r);
+        assert!(
+            !native.status.success(),
+            "native accepted deferred setting {expression}"
+        );
+        assert!(
+            !oracle.status.success(),
+            "Nix accepted deferred setting {expression}"
+        );
+        assert!(native.stdout.is_empty() && oracle.stdout.is_empty());
+        assert!(
+            stderr(&native).contains("must be a literal Boolean"),
+            "{}",
+            stderr(&native)
+        );
+        assert!(
+            stderr(&oracle).contains("is a thunk"),
+            "{}",
+            stderr(&oracle)
+        );
+    }
 }
 
 const COUNT: &str = r#"{

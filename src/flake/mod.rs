@@ -320,8 +320,15 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
     let initial_tree = source::tree(ev, &fr.source, false, pos)?;
     let initial_info = fetch::emit_tree_attrs(ev, &initial_tree, Some("self"), pos)?;
     let initial_attrs = ev.force_attrs(initial_info, pos, "while reading initial sourceInfo")?;
-    let initial_out = initial_attrs.get(ev.s.out_path).expect("sourceInfo outPath").cell.get();
-    let mut initial_path = ev.force_string(initial_out, pos, "while reading initial outPath")?.bytes.to_vec();
+    let initial_out = initial_attrs
+        .get(ev.s.out_path)
+        .expect("sourceInfo outPath")
+        .cell
+        .get();
+    let mut initial_path = ev
+        .force_string(initial_out, pos, "while reading initial outPath")?
+        .bytes
+        .to_vec();
     if !initial_tree.subdir.is_empty() {
         initial_path.push(b'/');
         initial_path.extend_from_slice(initial_tree.subdir.as_bytes());
@@ -598,13 +605,17 @@ fn root_submodules(ev: &mut Evaluator, flake: Word, pos: Pos) -> EvalResult<Opti
         ));
     }
     match settings.get(submodules) {
-        Some(a) => ev
-            .force_bool(
-                a.cell.get(),
+        // Nix reads source options without forcing deferred expressions.
+        // In particular, importing a Boolean is not a valid flake setting.
+        Some(a) => match a.cell.get() {
+            Word::TRUE => Ok(Some(true)),
+            Word::FALSE => Ok(Some(false)),
+            _ => Err(EvalError::boxed(
+                ErrorKind::Type,
+                "root source option 'inputs.self.submodules' must be a literal Boolean",
                 pos,
-                "while evaluating 'inputs.self.submodules'",
-            )
-            .map(Some),
+            )),
+        },
         None => Ok(None),
     }
 }

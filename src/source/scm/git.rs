@@ -348,13 +348,22 @@ fn tree_at(
     // Mount only gitlinks configured by this revision, never mappings from
     // the mutable checkout. Unconfigured gitlinks remain empty directories.
     let mounts: HashSet<PathBuf> = if submodules
-        && listed.iter().any(|(path, mode, _)| path == b".gitmodules" && mode != b"160000")
+        && listed
+            .iter()
+            .any(|(path, mode, _)| path == b".gitmodules" && mode != b"160000")
     {
         let blob = format!("{rev}:.gitmodules");
         let (status, out) = run(
             &quiet,
             root,
-            &["config", "--blob", &blob, "--null", "--get-regexp", "^submodule\\..*\\.path$"],
+            &[
+                "config",
+                "--blob",
+                &blob,
+                "--null",
+                "--get-regexp",
+                "^submodule\\..*\\.path$",
+            ],
         )?;
         if status != 0 && status != 1 {
             return Err(format!("iets: cannot read submodule paths in '{blob}'"));

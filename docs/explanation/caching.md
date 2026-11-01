@@ -158,6 +158,13 @@ Every primop that looks at the world records one observation.
 | an environment variable, as a keyed hash | `getEnv`; `HOME` when a `~/` literal is compiled | read it again and hash it again |
 | which query of which SCM was asked in which directory, and its exit status and output | the queries of the SCM that read a flake working tree or a repository; for git, `ls-files`, `status`, `rev-parse HEAD`, `show-ref --head` for a `ref`, and `config core.attributesFile` for `export-ignore` | ask the same query again, rehash |
 
+Root self settings are selected before the final source is assembled. The
+mutable checkout's `flake.nix` bytes are observed independently, even if an
+explicit self setting then pins a clean source to its commit. A change hidden
+from Git status by `update-index --assume-unchanged` still invalidates that
+selection. As in Nix, the setting itself must be a literal Boolean, not an
+imported or computed value.
+
 What follows from an observation is not itself an observation. The date
 and the count of a revision follow from the revision, because a commit is
 named by the hash of its content, its date and its parents.

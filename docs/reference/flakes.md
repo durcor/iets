@@ -75,14 +75,18 @@ not a dependency and needs no lock node. Initialized submodules, including
 nested ones, are included natively. Relative inputs such as
 `inputs.nh.url = "path:./src/nh"` read through that assembled source.
 Untracked files and `.git` remain invisible in every included worktree.
-`false`, or no setting, leaves submodule contents out. Other `inputs.self`
+`false`, or no setting, leaves submodule contents out. The setting must be a
+literal Boolean: Nix rejects deferred expressions such as `import ./settings.nix`,
+even when they return a Boolean, and iets does too. Other `inputs.self`
 source options are not supported.
 
 As in Nix 2.34.9, applying an explicit self source setting refetches the
 root. A parent that was clean before including submodules is already
-resolved to its commit: the refetch uses committed gitlinks, ignoring dirty
-child files and moved child HEADs. An independently dirty parent keeps its
-working tree, including tracked edits in initialized child worktrees. Its
+resolved to its commit: the refetch mounts only gitlinks configured by that
+commit's `.gitmodules`, recursively. An unconfigured gitlink remains an empty
+directory. Dirty child files and moved child HEADs are ignored. An independently
+dirty parent keeps its working tree, including tracked edits in initialized
+child worktrees. Its
 source hash and cached evaluation change when those files change; dirty
 children omit the root's clean revision/count metadata. `lastModified`
 remains the parent commit's date.
@@ -96,8 +100,9 @@ Imports follow tracked ancestor and leaf symlinks within the virtual source
 before checking final visibility. Relative imports use a direct leaf link's
 target directory. A directory import appends `default.nix` after resolving
 the directory and retains that directory as its relative-import base, even
-if `default.nix` is itself a symlink. Untracked targets, escapes in pure
-evaluation, and cycles are still rejected.
+if `default.nix` is itself a symlink. This also works before a clean or pinned
+source has been materialized in the real store. Untracked targets, escapes in
+pure evaluation, and cycles are still rejected.
 
 ## Flake references
 

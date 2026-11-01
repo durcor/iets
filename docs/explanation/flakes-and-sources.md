@@ -105,8 +105,9 @@ Untracked files and `.git` are excluded. Submodule contents are excluded by
 default. `inputs.self.submodules = true` includes initialized submodules
 recursively. This is a source setting, not an input to lock. As in Nix,
 applying self source settings refetches a clean parent at its resolved
-revision, using committed gitlinks; an independently dirty parent retains
-its working tree. The [flake reference](../reference/flakes.md#root-source-settings)
+revision, using gitlinks configured in that commit's `.gitmodules` at every
+level; unconfigured gitlinks remain empty directories. An independently dirty
+parent retains its working tree. The [flake reference](../reference/flakes.md#root-source-settings)
 describes that distinction and the initialization limits. `git` supplies the
 tree before the evaluation starts: `ls-files --stage -v` and
 `status --porcelain -uno` give the file set and the dirty flag, and
@@ -182,6 +183,8 @@ relative-import base. A directory import resolves the directory first and
 then appends `default.nix`: its target is checked for visibility without
 changing that directory's relative-import base. Thus even a symlinked
 `default.nix` behaves like Nix, without bypassing the virtual-tree filter.
+The same walker reads symlink targets from packed input-store trees, so clean
+and pinned sources need not be materialized to preserve import identity.
 
 A flake directory that is itself a symlink to a working tree is that
 working tree: `git.cc` opens the repository, which resolves the path. An
