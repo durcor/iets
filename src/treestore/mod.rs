@@ -106,6 +106,15 @@ impl StoredTree {
         self.tree.resolve(rel, follow).map(Node::file_type)
     }
 
+    /// A symlink's target without following the final component. Ancestors
+    /// use the same resolution as the other member accessors.
+    pub fn read_link(&self, rel: &[u8]) -> Option<&[u8]> {
+        match self.tree.resolve(rel, false)? {
+            Node::Symlink(target) => Some(target),
+            _ => None,
+        }
+    }
+
     /// A directory's entries, in NAR order. `ENOTDIR` for anything else.
     pub fn list(&self, rel: &[u8]) -> io::Result<Vec<(Vec<u8>, FileType)>> {
         match self.tree.resolve(rel, true) {
