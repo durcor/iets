@@ -76,7 +76,7 @@ pub trait Scm: Sync {
     /// Reads the working tree at `root`. Each answer that does not come
     /// from a tracked file is recorded in `trace`, so the tracing cache
     /// asks again.
-    fn snapshot(&self, trace: &Trace, root: &Path) -> Result<Snapshot, String>;
+    fn snapshot(&self, trace: &Trace, root: &Path, submodules: bool) -> Result<Snapshot, String>;
 
     /// The number of revisions up to `rev` in the working tree at `root`,
     /// for a tree that is `countable`. The answer follows from `rev`, so it
@@ -114,8 +114,22 @@ pub trait Scm: Sync {
         _root: &Path,
         _rev: &str,
         _export: bool,
+        _submodules: bool,
     ) -> Result<Option<Commit>, String> {
         Ok(None)
+    }
+
+    /// Read one file of a revision before copying its tree, so root-source
+    /// settings can be checked before assembling the source.
+    fn read_at(&self, trace: &Trace, root: &Path, rev: &str, path: &str) -> Result<Vec<u8>, String> {
+        let commit = self.tree_at(trace, root, rev, false, false)?;
+        commit
+            .and_then(|c| c.entries.into_iter().find(|(p, _)| p == path.as_bytes()))
+            .and_then(|(_, e)| match e {
+                Entry::File { bytes, .. } => Some(bytes),
+                _ => None,
+            })
+            .ok_or_else(|| format!("iets: cannot read '{path}' at revision {rev} in '{}'", root.display()))
     }
 
     /// For `rel`, a file on disk below `root` that the SCM does not track:

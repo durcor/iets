@@ -1,8 +1,8 @@
-//! git. The tree is what git.cc:getAccessorFromWorkdir copies: the index
-//! entries that still exist, no `.git`, no submodules. Each command that reads
-//! the working tree is a `Cmd` observation. The date and the count follow from
-//! the revision, which is one, so they are none (git.cc:getLastModified and
-//! getRevCount keep them by revision). The tree of a revision follows from
+//! git. A working tree contains its tracked files, never `.git` or untracked
+//! files. With submodules enabled, initialized child worktrees are included
+//! recursively. Each command that reads a working tree is a `Cmd` observation.
+//! The date and count follow from the revision, so they are none
+//! (git.cc:getLastModified and getRevCount keep them by revision). The tree follows
 //! it too; the name of a branch or a tag is a `Cmd` observation of the refs.
 
 use crate::sys::{self, OsStrExt};
@@ -234,10 +234,69 @@ fn same_attributes(
     Ok(true)
 }
 
+/// Workdir submodule mountpoints come from .gitmodules, just as Nix's
+/// getWorkdirInfo does. Observe the file, not a derived git-config query.
+fn submodule_paths(trace: &Trace, root: &Path) -> Result<Vec<PathBuf>, String> {
+    if observe(trace, &root.join(".gitmodules")).is_none() {
+        return Ok(Vec::new());
+    }
+    let (status, out) = run(
+        &Trace::default(),
+        root,
+        &["config", "--file", ".gitmodules", "--null", "--get-regexp", "^submodule\\..*\\.path$"],
+    )?;
+    if status == 1 {
+        return Ok(Vec::new());
+    }
+    if status != 0 {
+        return Err(format!("iets: cannot read submodule paths in '{}/.gitmodules'", root.display()));
+    }
+    let mut paths = Vec::new();
+    for entry in out.split(|&b| b == 0).filter(|e| !e.is_empty()) {
+        let Some(nl) = entry.iter().position(|&b| b == b'\n') else {
+            return Err("iets: invalid Git submodule path record".into());
+        };
+        let path = Path::new(OsStr::from_bytes(&entry[nl + 1..]));
+        if path.as_os_str().is_empty()
+            || path.components().any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(format!("iets: invalid submodule path '{}'", path.display()));
+        }
+        let path = initialized_submodule(trace, root, &root.join(path))?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn initialized_submodule(trace: &Trace, root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let uninitialized = || format!(
+        "iets: submodule '{}' is not initialized; run git submodule update --init --recursive",
+        path.display()
+    );
+    let mut at = root.to_path_buf();
+    for component in path.strip_prefix(root).map_err(|_| uninitialized())?.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err(uninitialized());
+        }
+        at.push(component.as_os_str());
+        if trace.stat_now(at.as_os_str().as_bytes(), false) != Kind::Directory {
+            return Err(uninitialized());
+        }
+    }
+    if at == root || trace.stat_now(at.join(".git").as_os_str().as_bytes(), true) == Kind::Missing {
+        return Err(uninitialized());
+    }
+    Ok(at)
+}
+
 /// The tree of `rev`, as git.cc:getAccessorFromCommit reads a local
-/// repository: every blob as it is stored, a submodule as an empty
-/// directory, and with `export`, no entry that `export-ignore` drops.
-fn tree_at(trace: &Trace, root: &Path, rev: &str, export: bool) -> Result<Option<Commit>, String> {
+/// repository: every blob as it is stored, and initialized submodules at
+/// their gitlink revisions when enabled (empty directories otherwise).
+/// With `export`, no entry that `export-ignore` drops is included.
+fn tree_at(trace: &Trace, root: &Path, rev: &str, export: bool, submodules: bool) -> Result<Option<Commit>, String> {
+    if export && submodules {
+        return Err("exportIgnore and submodules are not supported together yet".into());
+    }
     let quiet = Trace::default();
     let commit = format!("{rev}^{{commit}}");
     if run(&quiet, root, &["cat-file", "-e", &commit])?.0 != 0 {
@@ -273,7 +332,19 @@ fn tree_at(trace: &Trace, root: &Path, rev: &str, export: bool) -> Result<Option
     let mut blobs = HashMap::new();
     for (path, mode, oid) in listed {
         if mode == b"160000" {
-            entries.push((path, Entry::Empty));
+            if submodules {
+                let child = initialized_submodule(trace, root, &root.join(OsStr::from_bytes(&path)))?;
+                let rev = str::from_utf8(&oid).map_err(|e| e.to_string())?;
+                let Some(commit) = tree_at(trace, &child, rev, false, true)? else {
+                    return Err(format!("iets: submodule '{}' has no revision {rev}", child.display()));
+                };
+                entries.push((path.clone(), Entry::Empty));
+                for (rel, entry) in commit.entries {
+                    entries.push(([path.as_slice(), b"/", rel.as_slice()].concat(), entry));
+                }
+            } else {
+                entries.push((path, Entry::Empty));
+            }
             continue;
         }
         let Some(nl) = out.iter().position(|&b| b == b'\n') else {
@@ -341,7 +412,7 @@ impl Scm for Git {
 
     /// git-utils.cc:getWorkdirInfo: index entries minus deleted ones; dirty
     /// when any tracked file differs from HEAD or the index.
-    fn snapshot(&self, trace: &Trace, root: &Path) -> Result<Snapshot, String> {
+    fn snapshot(&self, trace: &Trace, root: &Path, submodules: bool) -> Result<Snapshot, String> {
         // `-v` tags an entry that git checks against the working tree no more
         // (`S` for skip-worktree, lower case for assume-unchanged): `git
         // status` never reports such an entry, while libgit2's status, which
@@ -378,6 +449,14 @@ impl Scm for Git {
             Some(h) => of_rev(root, &["log", "-1", "--format=%ct", h])?,
             None => 0,
         };
+        if submodules {
+            for child in submodule_paths(trace, root)? {
+                let at = self.snapshot(trace, &child, true)?;
+                dirty |= at.dirty;
+                files.insert(child);
+                files.extend(at.files);
+            }
+        }
         let shallow = root.join(".git/shallow");
         let shallow = trace.stat_now(shallow.as_os_str().as_bytes(), true) != Kind::Missing;
         Ok(Snapshot {
@@ -416,8 +495,32 @@ impl Scm for Git {
         root: &Path,
         rev: &str,
         export: bool,
+        submodules: bool,
     ) -> Result<Option<Commit>, String> {
-        tree_at(trace, root, rev, export)
+        tree_at(trace, root, rev, export, submodules)
+    }
+
+    fn read_at(&self, _trace: &Trace, root: &Path, rev: &str, path: &str) -> Result<Vec<u8>, String> {
+        // cat-file follows links within the revision, not on the host. Its
+        // special response for a link outside the tree is rejected below.
+        let input = format!("{rev}:{path}\n").into_bytes();
+        let (status, mut out) = piped(root, &["cat-file", "--batch", "--follow-symlinks"], input)?;
+        if status == 0
+            && let Some(nl) = out.iter().position(|&b| b == b'\n')
+        {
+            let mut fields = out[..nl].split(|&b| b == b' ');
+            let _oid = fields.next();
+            if fields.next() == Some(b"blob".as_slice())
+                && let Some(size) = fields.next().and_then(|s| str::from_utf8(s).ok()?.parse::<usize>().ok())
+                && fields.next().is_none()
+                && let Some(end) = (nl + 1).checked_add(size).filter(|end| *end <= out.len())
+            {
+                out.copy_within(nl + 1..end, 0);
+                out.truncate(size);
+                return Ok(out);
+            }
+        }
+        Err(format!("iets: cannot read '{path}' at revision {rev} in '{}'", root.display()))
     }
 
     fn rev_count(&self, root: &Path, rev: &str) -> Result<u64, String> {

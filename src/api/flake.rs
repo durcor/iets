@@ -59,7 +59,7 @@ pub fn url(fr: &FlakeRef) -> String {
 
 /// The tree a reference names, copied or fetched if it is not here yet.
 pub fn tree(ev: &mut Evaluator, r: &SourceRef) -> EvalResult<Tree> {
-    source::tree(ev, r, Pos::NONE)
+    source::tree(ev, r, false, Pos::NONE)
 }
 
 /// What a flake names before anything is evaluated: the directory, where its

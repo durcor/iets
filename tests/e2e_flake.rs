@@ -576,6 +576,250 @@ fn a_git_working_tree() {
     );
 }
 
+/// `self` configures the root source; it is not an unlocked dependency.
+#[test]
+fn root_self_settings_without_dependencies() {
+    let Some(mut f) = F::new() else {
+        return;
+    };
+    let repo = f.work().join("self-settings");
+    write(
+        &repo.join("flake.nix"),
+        r#"{
+          inputs.self.submodules = true;
+          outputs = { self }: {
+            v = builtins.toJSON {
+              inherit (self) narHash submodules rev revCount lastModified lastModifiedDate;
+              names = builtins.attrNames self.inputs;
+              data = builtins.readFile (self + "/data");
+            };
+          };
+        }"#,
+    );
+    write(&repo.join("data"), "root data");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "self settings"]);
+    let r = format!("{}#v", repo.display());
+    f.check_fresh("self settings without flake.lock", &r);
+    assert!(!repo.join("flake.lock").exists());
+    let source = fs::read_to_string(repo.join("flake.nix")).unwrap();
+    write(&repo.join("flake.nix"), &source.replace("submodules = true", "submodules = false"));
+    git(&repo, &["commit", "-q", "-am", "disabled self settings"]);
+    f.check_fresh("disabled self settings without flake.lock", &r);
+    assert!(!repo.join("flake.lock").exists());
+    write(&repo.join("flake.nix"), &source.replace("submodules = true", "submodules = \"true\""));
+    let n = f.nix_eval(&r);
+    let i = f.iets_eval(&[], &["--raw", "--no-cache", &r]);
+    f.verdict(!n.status.success() && !i.status.success(), || {
+        format!("submodules must be a Boolean: {} / {}", stderr(&n), stderr(&i))
+    });
+
+    // Excluding self must not hide genuine implicit dependencies.
+    write(
+        &repo.join("flake.nix"),
+        "{ inputs.self.submodules = true; outputs = { self, missing }: { v = \"unused\"; }; }",
+    );
+    let i = f.iets_eval(&[], &["--raw", "--no-cache", &r]);
+    f.verdict(
+        !i.status.success() && stderr(&i).contains("input 'missing'"),
+        || format!("implicit dependency still needs a lock: {}", stderr(&i)),
+    );
+}
+
+const SUBMODULES: &str = r#"{
+  inputs.self.submodules = @ENABLED@;
+  @INPUT@
+  outputs = { self, ... }@inputs: {
+    v = builtins.toJSON {
+      info = self.sourceInfo;
+      visible = builtins.pathExists (self + "/src/nh/flake.nix");
+      hidden = builtins.pathExists (self + "/src/nh/untracked");
+      git = builtins.pathExists (self + "/src/nh/.git");
+      rootHidden = builtins.pathExists (self + "/untracked");
+      content = if self.submodules then builtins.readFile (self + "/src/nh/data") else null;
+      nested = if self.submodules then builtins.readFile (self + "/src/nh/nested/data") else null;
+      extra = if self.submodules && builtins.pathExists (self + "/src/nh/extra")
+        then builtins.readFile (self + "/src/nh/extra") else null;
+      input = if inputs ? nh then inputs.nh.value else null;
+    };
+    drv = (derivation {
+      name = "submodule-source";
+      system = "x86_64-linux";
+      builder = "/bin/sh";
+      source = self;
+      data = if self.submodules then builtins.readFile (self + "/src/nh/nested/data") else "disabled";
+    }).drvPath;
+  };
+}"#;
+
+/// Native submodule trees have the same visibility, content address and
+/// metadata as Nix, including nested worktrees and relative path inputs.
+#[test]
+fn git_submodules_are_root_source_settings() {
+    let Some(mut f) = F::new() else {
+        return;
+    };
+    let w = f.work();
+    let nested = w.join("nested-origin");
+    write(&nested.join("data"), "nested one");
+    git(&nested, &["init", "-q"]);
+    git(&nested, &["add", "-A"]);
+    git(&nested, &["commit", "-q", "-m", "nested"]);
+    let origin = w.join("nh-origin");
+    write(
+        &origin.join("flake.nix"),
+        "{ outputs = { self }: { value = builtins.readFile (self + \"/data\") + builtins.readFile (self + \"/nested/data\"); }; }",
+    );
+    write(&origin.join("data"), "module one");
+    write(&origin.join("executable"), "#!/bin/sh\nexit 0\n");
+    fs::set_permissions(origin.join("executable"), fs::Permissions::from_mode(0o755)).unwrap();
+    symlink("data", origin.join("link")).unwrap();
+    git(&origin, &["init", "-q"]);
+    git(&origin, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", nested.to_str().unwrap(), "nested"]);
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-q", "-m", "module"]);
+
+    let repo = w.join("submodule-root");
+    let flake = |enabled: bool, input: bool| {
+        SUBMODULES
+            .replace("@ENABLED@", if enabled { "true" } else { "false" })
+            .replace("@INPUT@", if input { "inputs.nh.url = \"path:./src/nh\";" } else { "" })
+    };
+    write(&repo.join("flake.nix"), &flake(true, false));
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", origin.to_str().unwrap(), "src/nh"]);
+    git(&repo, &["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "root"]);
+    let r = format!("{}#v", repo.display());
+    let drv = format!("{}#drv", repo.display());
+    let module = repo.join("src/nh");
+    let child = module.join("nested");
+
+    // Only Git is executable: a root tree cannot delegate evaluation or
+    // fetching to Nix, and it has not been materialized by the oracle yet.
+    let git_bin = w.join("git-only");
+    mkdir(&git_bin);
+    symlink(e2e::resolved("git"), git_bin.join("git")).unwrap();
+    let no_nix = f.s.no_nix();
+    let env = [
+        ("PATH", git_bin.to_str().unwrap()),
+        ("IETS_NIX_BIN_DIR", no_nix.to_str().unwrap()),
+        ("IETS_CACHE", "0"),
+    ];
+    let native = f.iets_eval(&env, &["--raw", "--no-cache", "--pure-eval", &r]);
+    let oracle = f.nix_eval(&r);
+    let clean: Value = serde_json::from_str(&stdout(&oracle)).unwrap();
+    f.verdict(native.status.success() && oracle.status.success() && native.stdout == oracle.stdout, || {
+        format!("native submodules: {} / {}", stderr(&native), stderr(&oracle))
+    });
+    assert_eq!(clean["visible"], true);
+    assert_eq!(clean["content"], "module one");
+    assert_eq!(clean["nested"], "nested one");
+    assert_eq!(clean["info"]["submodules"], true);
+    assert!(clean["info"]["rev"].is_string());
+    assert!(clean["info"]["revCount"].is_number());
+    assert_eq!(clean["info"]["narHash"], f.nar_hash(clean["info"]["outPath"].as_str().unwrap()));
+    assert!(!repo.join("flake.lock").exists());
+    f.check("submodule deterministic derivation", &drv, &[]);
+    let rev = stdout(&git(&repo, &["rev-parse", "HEAD"]));
+    let pinned = format!("git+file://{}?rev={rev}#v", repo.display());
+    f.check("pinned root includes committed submodules", &pinned, &[]);
+
+    write(&module.join("untracked"), "must stay hidden");
+    write(&repo.join("untracked"), "also hidden");
+    f.check("untracked submodule files do not affect source hash or metadata", &r, &[]);
+    let untracked = f.iets_eval(&[], &["--raw", "--pure-eval", &r]);
+    assert_eq!(untracked.stdout, oracle.stdout);
+    assert_eq!(clean["hidden"], false);
+    assert_eq!(clean["git"], false);
+    assert_eq!(clean["rootHidden"], false);
+    let hit = f.cache_lines(&r);
+    f.verdict(hit.contains("cache: hit"), || format!("submodule cache warmup: {hit}"));
+
+    for contents in ["module dirty one", "module dirty two"] {
+        write(&module.join("data"), contents);
+        let i = f.iets_eval(&[], &["--raw", "--timings", "--pure-eval", &r]);
+        let n = f.nix_eval(&r);
+        let value: Value = serde_json::from_str(&stdout(&i)).unwrap();
+        f.verdict(i.status.success() && n.status.success() && i.stdout == n.stdout && stderr(&i).contains("miss ("), || {
+            format!("submodule cache invalidates: {} / {}", stderr(&i), stderr(&n))
+        });
+        assert_eq!(value["content"], contents);
+        assert_ne!(value["info"]["narHash"], clean["info"]["narHash"]);
+        assert!(value["info"].get("rev").is_none());
+        assert!(value["info"].get("revCount").is_none());
+        assert!(value["info"]["dirtyRev"].is_string());
+        assert_eq!(value["info"]["lastModified"], clean["info"]["lastModified"]);
+        f.check("dirty submodule uncached", &r, &[]);
+    }
+    git(&module, &["commit", "-q", "-am", "module changed"]);
+    f.check("clean changed submodule HEAD does not dirty parent", &r, &[]);
+    let advanced: Value = serde_json::from_str(&stdout(&f.iets_eval(&[], &["--raw", &r]))).unwrap();
+    assert_eq!(advanced["info"]["rev"], clean["info"]["rev"]);
+    assert_eq!(advanced["info"]["revCount"], clean["info"]["revCount"]);
+    assert_ne!(advanced["info"]["narHash"], clean["info"]["narHash"]);
+    write(&child.join("data"), "nested changed");
+    let nested_dirty = f.iets_eval(&[], &["--raw", "--timings", &r]);
+    let nested_oracle = f.nix_eval(&r);
+    f.verdict(nested_dirty.status.success() && nested_dirty.stdout == nested_oracle.stdout && stderr(&nested_dirty).contains("miss ("), || {
+        format!("nested submodule cache invalidation: {} / {}", stderr(&nested_dirty), stderr(&nested_oracle))
+    });
+    f.check("nested submodule dirties root and changes hash", &r, &[]);
+    f.check("nested submodule changes derivation", &drv, &[]);
+    f.check("pinned root ignores dirty child worktrees", &pinned, &[]);
+
+    // A new untracked file stays invisible; staging and deleting it must
+    // invalidate the cached file set, not just the bytes of existing files.
+    let before = f.iets_eval(&[], &["--raw", &r]);
+    write(&module.join("extra"), "new tracked member");
+    let hidden = f.iets_eval(&[], &["--raw", &r]);
+    assert_eq!(before.stdout, hidden.stdout);
+    git(&module, &["add", "extra"]);
+    let staged = f.iets_eval(&[], &["--raw", "--timings", &r]);
+    let staged_oracle = f.nix_eval(&r);
+    assert_eq!(staged.stdout, staged_oracle.stdout);
+    assert!(stderr(&staged).contains("miss ("), "{}", stderr(&staged));
+    let staged_value: Value = serde_json::from_str(&stdout(&staged)).unwrap();
+    assert_eq!(staged_value["extra"], "new tracked member");
+    fs::remove_file(module.join("extra")).unwrap();
+    let deleted = f.iets_eval(&[], &["--raw", "--timings", &r]);
+    let deleted_oracle = f.nix_eval(&r);
+    assert_eq!(deleted.stdout, deleted_oracle.stdout);
+    assert!(stderr(&deleted).contains("miss ("), "{}", stderr(&deleted));
+    let deleted_value: Value = serde_json::from_str(&stdout(&deleted)).unwrap();
+    assert_eq!(deleted_value["extra"], Value::Null);
+
+    write(&repo.join("flake.nix"), &flake(true, true));
+    let locked = f.lock(repo.to_str().unwrap());
+    assert!(locked.status.success(), "{}", stderr(&locked));
+    git(&repo, &["add", "flake.nix", "flake.lock", "src/nh"]);
+    git(&repo, &["commit", "-q", "-m", "relative path input"]);
+    f.check("relative path input through submodule, pure native root", &r, &[]);
+    let value: Value = serde_json::from_str(&stdout(&f.nix_eval(&r))).unwrap();
+    assert_eq!(value["input"], "module dirty twonested changed");
+    let pure = f.iets_eval(&env, &["--raw", "--no-cache", "--pure-eval", &r]);
+    assert!(pure.status.success(), "{}", stderr(&pure));
+    assert_eq!(serde_json::from_str::<Value>(&stdout(&pure)).unwrap(), value);
+
+    // Disabled sources must neither include nor observe child content.
+    fs::remove_file(repo.join("flake.lock")).unwrap();
+    write(&repo.join("flake.nix"), &flake(false, false));
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "disable submodules"]);
+    let disabled = f.iets_eval(&[], &["--raw", &r]);
+    f.check("disabled submodules retain original visibility", &r, &[]);
+    let value: Value = serde_json::from_str(&stdout(&disabled)).unwrap();
+    assert_eq!(value["visible"], false);
+    assert_eq!(value["info"]["submodules"], false);
+    write(&module.join("data"), "ignored when disabled");
+    write(&child.join("data"), "nested ignored when disabled");
+    let ignored = f.iets_eval(&[], &["--raw", &r]);
+    assert_eq!(ignored.stdout, disabled.stdout);
+    f.check("disabled child edits leave root hash and metadata unchanged", &r, &[]);
+}
+
 const COUNT: &str = r#"{
   inputs.reader.url = "path:@WORK@/reader";
   outputs = { self, reader }:
