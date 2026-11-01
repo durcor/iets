@@ -244,3 +244,41 @@ fn checkout_fetches_use_final_unmaterialized_clean_and_pinned_roots() {
         f.metadata_parity(&changed);
     }
 }
+
+#[test]
+fn checkout_fetches_follow_no_head_roots_through_the_first_commit() {
+    for setting in [None, Some(false), Some(true)] {
+        let Some(f) = Fixture::new(setting, true, false) else {
+            return;
+        };
+        let initial = f.snapshot("in");
+        assert!(initial["info"].get("rev").is_none());
+        assert!(initial["info"].get("dirtyRev").is_none());
+        assert!(initial["info"].get("revCount").is_none());
+        assert_eq!(initial["info"]["lastModified"], 0);
+        assert_eq!(initial["info"]["submodules"], setting.unwrap_or(false));
+        f.rejects_checkout_only_paths();
+
+        fs::write(f.flake.join("in.txt"), "first checkout edit").unwrap();
+        let edited = f.snapshot("first checkout edit");
+        assert_ne!(edited["source"], initial["source"]);
+        assert!(edited["info"].get("rev").is_none());
+        assert!(edited["info"].get("dirtyRev").is_none());
+        assert!(edited["info"].get("revCount").is_none());
+        assert_eq!(edited["info"]["lastModified"], 0);
+
+        // Creating HEAD changes metadata even when the source bytes and NAR
+        // identity are unchanged. Keep the checkout-only files out of the index.
+        git(&f.repo, &["add", "nested/in.txt"]);
+        git(&f.repo, &["commit", "-qm", "first root revision"]);
+        let committed = f.snapshot("first checkout edit");
+        assert_eq!(committed["source"], edited["source"]);
+        assert!(committed["info"]["rev"].is_string());
+        assert!(committed["info"].get("dirtyRev").is_none());
+        assert_eq!(committed["info"]["revCount"], 1);
+        assert!(committed["info"]["lastModified"].as_u64().unwrap() > 0);
+        assert_eq!(committed["info"]["submodules"], setting.unwrap_or(false));
+        f.rejects_checkout_only_paths();
+        f.metadata_parity(&committed);
+    }
+}
