@@ -183,10 +183,10 @@ pub fn resolve_links(ev: &Evaluator, path: &[u8], mode: Follow, pos: Pos) -> Eva
 
 /// Where a read of `path` goes once the symlinks `mode` names are resolved,
 /// and its place in the (virtual) store, `None` for one the real file system
-/// answers. [`resolve_links`] runs under a store path copied from a local
-/// tree, and in a pure evaluation under the project, where the kernel would
-/// follow a link out of an allow list judged on the text of the path.
-/// Elsewhere the kernel or the spool resolves as the accessor would.
+/// answers. [`resolve_links`] runs under virtual store trees, whether backed
+/// by a local checkout or the input store, and in a pure evaluation under the
+/// project, where the kernel would follow a link out of an allow list judged
+/// on the text of the path. Elsewhere the kernel resolves as the accessor would.
 pub fn located(
     ev: &Evaluator,
     path: Vec<u8>,
@@ -195,7 +195,7 @@ pub fn located(
 ) -> EvalResult<(Vec<u8>, Option<SrcPath>)> {
     let at = locate(ev, &path);
     let walk = match &at {
-        Some(at) => matches!(at.src, Src::Fs { .. }),
+        Some(at) => matches!(at.src, Src::Fs { .. } | Src::Spool { .. }),
         None => ev.pure() && ev.in_project(&path),
     };
     if !walk {
@@ -471,12 +471,13 @@ impl SrcPath {
 
     /// A symlink's target, `None` for anything else and for an entry the
     /// tree's filter hides. The tree's own observation covers every target in
-    /// it, so nothing is recorded. A spool member is never one: the entry
-    /// resolves its own links ([`crate::fetch::spool`]).
+    /// it, so nothing is recorded. Both disk and spool targets feed the same
+    /// virtual path resolver, retaining the target's store-relative identity.
     pub fn read_link(&self) -> Option<Vec<u8>> {
         match self.at()? {
             At::Disk(p) => Some(sys::path_to_internal(&fs::read_link(os(&p)).ok()?)),
-            At::Spool(..) | At::Mem(_) => None,
+            At::Spool(tree, _) => tree.read_link(&self.rel).map(<[u8]>::to_vec),
+            At::Mem(_) => None,
         }
     }
 

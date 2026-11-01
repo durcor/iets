@@ -15,25 +15,52 @@ use e2e::{Store, git, stderr, stdout};
 struct Fixture {
     store: Store,
     repo: PathBuf,
+    reference: String,
 }
 
 impl Fixture {
     fn new() -> Option<Self> {
+        Self::with_self_setting(None)
+    }
+
+    fn with_self_setting(submodules: Option<bool>) -> Option<Self> {
         let store = Store::start_with(&[])?;
         let repo = store.dir().join("repo");
         fs::create_dir_all(repo.join(".config/nixos")).unwrap();
         fs::create_dir_all(repo.join(".config/modules")).unwrap();
         fs::create_dir_all(repo.join("private-default")).unwrap();
         fs::create_dir_all(repo.join("aliases")).unwrap();
+        let setting = submodules
+            .map(|enabled| format!("inputs.self.submodules = {enabled};"))
+            .unwrap_or_default();
         fs::write(
             repo.join("flake.nix"),
             r#"{
-  outputs = { self }: {
+  @SELF@
+  outputs = { self }:
+  let
+    filtered = excluded: builtins.path {
+      path = self;
+      name = "filtered-imports";
+      filter = path: type: builtins.baseNameOf path != excluded;
+    };
+    visible = filtered "scoped.nix";
+  in {
     ancestor = import "${self}/etc/nixos/configuration.nix";
     directory = import "${self}/etc/nixos";
+    defaultLeaf = import "${self}/etc/nixos/default.nix";
     leaf = import "${self}/aliases/module.nix";
     scoped = builtins.scopedImport { suffix = "-scoped"; } "${self}/aliases/scoped.nix";
+    scopedDirectory = builtins.scopedImport {} "${self}/etc/nixos";
+    scopedDefaultLeaf = builtins.scopedImport {} "${self}/etc/nixos/default.nix";
     identity = (import "${self}/aliases/identity.nix") == "${self}/.config/nixos";
+    scopedIdentity = (builtins.scopedImport {} "${self}/aliases/identity.nix") == "${self}/.config/nixos";
+    filteredLeaf = import "${visible}/aliases/module.nix";
+    filteredIdentity = (import "${visible}/aliases/identity.nix") == "${visible}/.config/nixos";
+    filteredTarget = import "${filtered "configuration.nix"}/aliases/module.nix";
+    filteredAncestor = import "${filtered ".config"}/etc/nixos/configuration.nix";
+    filteredLink = import "${filtered "module.nix"}/aliases/module.nix";
+    source = self.outPath;
     untracked = import "${self}/untracked-link.nix";
     untrackedDirectory = import "${self}/untracked-dir/module.nix";
     untrackedDefault = import "${self}/private-default";
@@ -45,7 +72,8 @@ impl Fixture {
     danglingImport = import "${self}/dangling.nix";
   };
 }
-"#,
+"#
+            .replace("@SELF@", &setting),
         )
         .unwrap();
         fs::write(
@@ -121,17 +149,27 @@ impl Fixture {
         fs::create_dir(repo.join("private-dir")).unwrap();
         fs::write(repo.join("private-dir/module.nix"), "\"host-secret\"\n").unwrap();
         symlink(".config/nixos/value.nix", repo.join("hidden-link.nix")).unwrap();
-        Some(Self { store, repo })
+        let git_bin = store.dir().join("git-only");
+        fs::create_dir(&git_bin).unwrap();
+        symlink(e2e::resolved("git"), git_bin.join("git")).unwrap();
+        let reference = repo.display().to_string();
+        Some(Self {
+            store,
+            repo,
+            reference,
+        })
     }
 
     fn iets(&self, attr: &str, cached: bool) -> Output {
         let mut cmd = self.store.iets();
         cmd.env("IETS_CACHE_DIR", self.store.dir().join("import-cache"))
+            .env("PATH", self.store.dir().join("git-only"))
+            .env("IETS_NIX_BIN_DIR", self.store.no_nix())
             .args(["eval", "--json", "--pure-eval", "--timings"]);
         if !cached {
             cmd.args(["--no-cache", "--no-tracing-cache"]);
         }
-        cmd.arg(format!("{}#{attr}", self.repo.display()))
+        cmd.arg(format!("{}#{attr}", self.reference))
             .output()
             .unwrap()
     }
@@ -140,7 +178,7 @@ impl Fixture {
         self.store
             .nix("nix")
             .args(["eval", "--json", "--option", "eval-cache", "false"])
-            .arg(format!("{}#{attr}", self.repo.display()))
+            .arg(format!("{}#{attr}", self.reference))
             .output()
             .unwrap()
     }
@@ -185,6 +223,103 @@ fn tracked_ancestor_and_leaf_imports_match_nix() {
     f.parity("directory", "\"target-one\"", false);
     f.parity("scoped", "\"target-one-scoped\"", false);
     f.parity("identity", "true", false);
+    f.parity("defaultLeaf", "\"directory-target\"", false);
+    f.parity("scopedDirectory", "\"target-one\"", false);
+    f.parity("scopedDefaultLeaf", "\"directory-target\"", false);
+    f.parity("scopedIdentity", "true", false);
+    f.parity("filteredLeaf", "\"target-one\"", false);
+    f.parity("filteredIdentity", "true", false);
+}
+
+#[test]
+fn committed_imports_resolve_before_any_oracle_materialization() {
+    for (submodules, pinned) in [
+        (Some(false), false),
+        (Some(true), false),
+        (None, true),
+        (Some(false), true),
+        (Some(true), true),
+    ] {
+        let Some(mut f) = Fixture::with_self_setting(submodules) else {
+            return;
+        };
+        if pinned {
+            let rev = stdout(&git(&f.repo, &["rev-parse", "HEAD"]));
+            f.reference = format!("git+file://{}?rev={rev}", f.repo.display());
+        }
+
+        let source = f.iets("source", false);
+        assert!(source.status.success(), "{}", stderr(&source));
+        let source: String = serde_json::from_slice(&source.stdout).unwrap();
+        assert!(
+            !PathBuf::from(&source).exists(),
+            "source was materialized before native imports: {source}"
+        );
+        let checks = [
+            ("ancestor", "\"target-one\""),
+            ("leaf", "\"target-one\""),
+            ("directory", "\"target-one\""),
+            ("defaultLeaf", "\"directory-target\""),
+            ("scoped", "\"target-one-scoped\""),
+            ("scopedDirectory", "\"target-one\""),
+            ("scopedDefaultLeaf", "\"directory-target\""),
+            ("identity", "true"),
+            ("scopedIdentity", "true"),
+            ("filteredLeaf", "\"target-one\""),
+            ("filteredIdentity", "true"),
+            ("danglingExists", "true"),
+        ];
+        // Run every native import, including cache population/hits and
+        // rejections, before the oracle can copy this source into its store.
+        let mut native = Vec::new();
+        for (attr, expected) in checks {
+            for (run, cached) in [false, true, true].into_iter().enumerate() {
+                let i = f.iets(attr, cached);
+                assert!(i.status.success(), "{attr}: {}", stderr(&i));
+                assert_eq!(stdout(&i), expected, "{attr}: native import");
+                if run == 2 {
+                    assert!(stderr(&i).contains("cache: hit"), "{attr}: {}", stderr(&i));
+                }
+                native.push((attr, i));
+            }
+        }
+        let rejected = [
+            "untracked",
+            "untrackedDirectory",
+            "untrackedDefault",
+            "hiddenLink",
+            "escape",
+            "absolute",
+            "cycle",
+            "danglingImport",
+            "filteredTarget",
+            "filteredAncestor",
+            "filteredLink",
+        ];
+        for attr in rejected {
+            let i = f.iets(attr, false);
+            assert!(!i.status.success(), "native accepted {attr}");
+            assert!(i.stdout.is_empty(), "native exposed {attr}");
+        }
+        assert!(
+            !PathBuf::from(&source).exists(),
+            "native imports materialized the source: {source}"
+        );
+
+        for (attr, expected) in checks {
+            let n = f.nix(attr);
+            assert!(n.status.success(), "{attr}: nix: {}", stderr(&n));
+            assert_eq!(stdout(&n), expected, "{attr}: oracle result");
+            for (_, i) in native.iter().filter(|(name, _)| *name == attr) {
+                assert_eq!(stdout(i), stdout(&n), "{attr}: import parity");
+            }
+        }
+        for attr in rejected {
+            let n = f.nix(attr);
+            assert!(!n.status.success(), "oracle accepted {attr}");
+            assert!(n.stdout.is_empty(), "oracle exposed {attr}");
+        }
+    }
 }
 
 #[test]
