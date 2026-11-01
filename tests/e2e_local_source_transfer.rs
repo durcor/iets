@@ -466,11 +466,22 @@ fn a_genuinely_missing_source_is_still_substituted() {
 }
 
 #[test]
-fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_ca_sources() {
+fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_signed_ia_and_ca() {
     let s = store!();
-    let fixture = Fixture::new(&s, false);
+    let mut fixture = Fixture::new(&s, false);
     let consumer = fixture.consumer(&s, "source-transfer-untrusted-consumer");
-    let b = s.builder("trust-boundary", &[("require-sigs", "true")]);
+    let secret_key = s.dir().join("fixture-signing-key.sec");
+    let public_key_file = s.dir().join("fixture-signing-key.pub");
+    ok(s.nix("nix-store")
+        .args(["--generate-binary-cache-key", "source-transfer-fixture"])
+        .arg(&secret_key)
+        .arg(&public_key_file));
+    let public_key = fs::read_to_string(&public_key_file).unwrap();
+    let public_key = public_key.trim();
+    let b = s.builder(
+        "trust-boundary",
+        &[("require-sigs", "true"), ("trusted-public-keys", public_key)],
+    );
 
     // As in the existing SSH transport fixture, the executable launcher avoids
     // needing an SSH server. All worker requests go to a real nix-daemon, whose
@@ -478,9 +489,10 @@ fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_ca_sources() {
     let ssh = s.write(
         "untrusted-bin/ssh",
         &format!(
-            "#!/bin/sh\nexec '{}' --store '{}' --extra-experimental-features daemon-trust-override --stdio --force-untrusted --option sandbox-paths /nix/store --option require-sigs true\n",
+            "#!/bin/sh\nexec '{}' --store '{}' --extra-experimental-features daemon-trust-override --stdio --force-untrusted --option sandbox-paths /nix/store --option require-sigs true --option trusted-public-keys '{}'\n",
             e2e::resolved("nix-daemon").display(),
-            b.store()
+            b.store(),
+            public_key
         ),
     );
     fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
@@ -561,7 +573,36 @@ fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_ca_sources() {
     assert!(!valid(&s, &fixture.input, Some(&b)));
     assert!(!valid(&s, &consumer.out, Some(&b)));
 
-    // Only the connection's existing trust differs: the very same store,
-    // signature policy, IA metadata and consumer succeed for a trusted peer.
-    consumer.build(&s, &b, &fixture);
+    // The same unsigned bytes are accepted through an already-trusted
+    // connection, without making them valid on the untrusted destination.
+    let trusted = s.builder("trusted-comparison", &[("require-sigs", "true")]);
+    consumer.build(&s, &trusted, &fixture);
+    assert!(!valid(&s, &fixture.input, Some(&b)));
+
+    // Only fixture-local keys and daemon options participate. Signing must
+    // change neither store identity, NAR bytes, nor any other copied metadata.
+    ok(s.nix("nix")
+        .args(["store", "sign", "--key-file"])
+        .arg(&secret_key)
+        .arg(&fixture.input));
+    let signed = Source::read(&s, fixture.input.clone());
+    assert_eq!(signed.bytes, fixture.sources[0].bytes);
+    let signatures = signed.info["signatures"].as_array().unwrap();
+    assert_eq!(signatures.len(), 1);
+    assert_eq!(
+        signatures[0].as_str().unwrap().split_once(':').unwrap().0,
+        "source-transfer-fixture"
+    );
+    let mut expected_identity = identity(&fixture.sources[0].info);
+    expected_identity["signatures"] = signed.info["signatures"].clone();
+    assert_eq!(identity(&signed.info), expected_identity);
+    fixture.sources[0] = signed;
+
+    let accepted = ok(s
+        .iets()
+        .env("PATH", &path)
+        .args(["build", "--builder", url, "--impure", "--no-tracing-cache"])
+        .arg(&consumer.file));
+    // This checks the exact nonempty signatures, not just successful import.
+    consumer.assert_result(&s, &b, &fixture, &accepted);
 }
