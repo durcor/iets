@@ -123,6 +123,10 @@ pub fn drvs_in_dir(dir: &Path) -> Result<FxHashMap<StorePath, DrvInfo>> {
 /// The plan's locator with no `--source` overrides: for a command that drives
 /// the upload on a connection of its own because it goes on to speak the
 /// worker protocol itself (`nix-shell`, `print-dev-env`).
+/// Stored paths carry complete metadata in [`LocatedSource::Stored`], including
+/// input-addressed outputs and their original signatures. Only unavailable
+/// paths return `None`; malformed metadata returns an error. The upload plan
+/// discovers runtime references and clears `ultimate` when copying.
 pub fn locate_store(paths: &[StorePath]) -> Result<Vec<Option<LocatedSource>>> {
     locate_in_store(paths, &HashMap::new())
 }

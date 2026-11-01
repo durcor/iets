@@ -148,6 +148,83 @@ fn a_source_tree_and_a_closure() {
     assert!(stderr(&o).contains(", 0 missing"), "{}", stderr(&o));
 }
 
+#[test]
+fn a_local_ia_input_source_keeps_its_runtime_closure() {
+    let Some(g) = start() else { return };
+    let s = &g.s;
+    let source_drv = stdout(&ok(s
+        .nix("nix-instantiate")
+        .arg(s.pkgs().join("chain.nix"))));
+    let input = s.nix_store(&["-r", &source_drv]);
+    let closure = s.nix_store(&["-qR", &input]);
+    let sources: Vec<_> = closure.lines().collect();
+    assert_eq!(sources.len(), 4);
+    let metadata: Value = serde_json::from_slice(
+        &ok(s.nix("nix").args(["path-info", "--json"]).args(&sources)).stdout,
+    )
+    .unwrap();
+    for path in &sources {
+        assert!(metadata[path]["ca"].is_null());
+        assert!(
+            !s.nix("nix-store")
+                .args(["--store", &g.b.store(), "--check-validity", path])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    let case = s.write("stored-source-consumer.nix", &format!(r#"derivation {{
+  name = "grpc-stored-source-consumer";
+  system = "@SYSTEM@";
+  builder = "@SHELL@";
+  args = [ "-c" ''while read -r line; do printf '%s\n' "$line"; done < ${{builtins.storePath "{input}"}}/n > "$out"'' ];
+}}
+"#));
+    let drv = stdout(&ok(s.nix("nix-instantiate").arg(&case)));
+    assert_eq!(s.nix_store(&["-q", "--references", &drv]), input);
+    let expected = s.nix_store(&["-q", "--outputs", &drv]);
+    let result = g.build(&["--impure", case.to_str().unwrap()]);
+    assert!(result.status.success(), "{}\n{}", stderr(&result), g.log());
+    assert_eq!(stdout(&result), expected);
+    assert_eq!(fs::read(g.b.real(&expected)).unwrap(), b"3\n");
+    let copied: Value = serde_json::from_slice(
+        &ok(s
+            .nix("nix")
+            .args(["path-info", "--json", "--store", &g.b.store()])
+            .args(&sources))
+        .stdout,
+    )
+    .unwrap();
+    for path in sources {
+        for key in [
+            "ca",
+            "narHash",
+            "narSize",
+            "references",
+            "deriver",
+            "signatures",
+        ] {
+            assert_eq!(copied[path][key], metadata[path][key], "{path}: {key}");
+        }
+        assert_ne!(copied[path]["ultimate"], true);
+        assert_eq!(
+            fs::read(g.b.real(path).join("n")).unwrap(),
+            fs::read(format!("{path}/n")).unwrap()
+        );
+        let producer = metadata[path]["deriver"].as_str().unwrap();
+        assert!(
+            !s.nix("nix-store")
+                .args(["--store", &g.b.store(), "--check-validity", producer])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    assert!(g.log().contains("method=AddMultipleToStore"));
+}
+
 /// iets under the name `nix`, as the classic package installs it.
 fn farm(s: &Store) -> PathBuf {
     let bin = s.dir().join("farm");

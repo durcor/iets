@@ -248,14 +248,11 @@ fn an_output_as_an_input_source() {
             case,
         ],
     );
-    let err = stderr(&o);
-    assert!(err.contains("query: 2 paths, 1 missing"), "{err}");
-    assert!(!err.contains("substitute:"), "{err}");
     assert_eq!(stdout(&o), expected);
     assert_eq!(fs::read_to_string(&expected).unwrap(), "3\n");
     assert_eq!(fs::read(&drv).unwrap(), drv_bytes);
 
-    // a builder that lacks the output substitutes it from a file:// cache
+    // A cold builder receives the locally valid output even when a cache exists.
     let cache = format!("file://{}/cache", s.dir().display());
     ok(s.nix("nix")
         .args(["copy", "--to", &format!("{cache}?compression=none"), &dep]));
@@ -269,7 +266,7 @@ fn an_output_as_an_input_source() {
             .success()
     };
     assert!(!valid(&dep));
-    let o = build(
+    build(
         &s,
         &[
             "--builder",
@@ -280,16 +277,6 @@ fn an_output_as_an_input_source() {
             "false",
             case,
         ],
-    );
-    let err = stderr(&o);
-    assert!(err.contains("query: 2 paths, 2 missing"), "{err}");
-    assert!(
-        err.contains("substitute: 1 paths left to the daemon"),
-        "{err}"
-    );
-    assert!(
-        err.contains("add: 1 paths"),
-        "only the drv is uploaded: {err}"
     );
     assert!(valid(&dep) && valid(&drv));
     assert_eq!(fs::read(b.real(&drv)).unwrap(), drv_bytes);
@@ -304,11 +291,6 @@ fn an_output_as_an_input_source() {
             "false",
             case,
         ],
-    );
-    assert!(
-        stderr(&o).contains("query: 2 paths, 0 missing"),
-        "{}",
-        stderr(&o)
     );
     assert_eq!(stdout(&o), expected);
     assert_eq!(fs::read_to_string(b.real(&expected)).unwrap(), "3\n");

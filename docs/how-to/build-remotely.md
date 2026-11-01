@@ -72,10 +72,14 @@ hint: TLS handshake failed and no client certificate was presented.
       Set 'client-cert'/'client-key' or 'token-file'.
 ```
 
-A token with the usual `write` role is enough. Everything iets uploads is
-content-addressed: a source tree, a `builtins.toFile` text, a `.drv`. The
-service computes the address itself and accepts the upload without a
-signature, so you never need the `trusted` role.
+A token with the usual `write` role accepts content-addressed uploads:
+source trees, `builtins.toFile` texts and derivations need no signature.
+A locally valid input-addressed output pinned as an input source is copied
+with its runtime closure and original metadata, without rebuilding its
+producer. It needs a signature by a key the service already trusts, or an
+already-authorized trusted connection. An unsigned local output does not
+become content-addressed merely because it is an input source; iets does
+not change the destination's trust policy.
 
 ## Flake checks
 

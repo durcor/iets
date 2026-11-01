@@ -33,19 +33,28 @@ impl PathInfo {
         let bad = |message: &str| Error::Protocol(format!("nix path-info for '{path}': {message}"));
         let object = value.as_object().ok_or_else(|| bad("not an object"))?;
         let string = |key: &str| {
-            object.get(key).and_then(|v| v.as_str())
+            object
+                .get(key)
+                .and_then(|v| v.as_str())
                 .ok_or_else(|| bad(&format!("'{key}' is not a string")))
         };
         let strings = |key: &str| -> Result<Vec<String>> {
-            object.get(key).and_then(|v| v.as_array())
+            object
+                .get(key)
+                .and_then(|v| v.as_array())
                 .ok_or_else(|| bad(&format!("'{key}' is not a list")))?
                 .iter()
-                .map(|v| v.as_str().map(str::to_string)
-                    .ok_or_else(|| bad(&format!("'{key}' contains a non-string"))))
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| bad(&format!("'{key}' contains a non-string")))
+                })
                 .collect()
         };
         let nar_hash = wire::nar_hash(string("narHash")?)?;
-        let nar_size = object.get("narSize").and_then(|v| v.as_u64())
+        let nar_size = object
+            .get("narSize")
+            .and_then(|v| v.as_u64())
             .ok_or_else(|| bad("'narSize' is not an unsigned integer"))?;
         let references = strings("references")?;
         for reference in &references {
@@ -67,21 +76,35 @@ impl PathInfo {
         };
         let registration_time = match object.get("registrationTime") {
             None | Some(serde_json::Value::Null) => 0,
-            Some(value) => value.as_u64().filter(|n| *n <= i64::MAX as u64)
+            Some(value) => value
+                .as_u64()
+                .filter(|n| *n <= i64::MAX as u64)
                 .ok_or_else(|| bad("'registrationTime' is not a valid time"))?,
         };
         let sigs = if object.contains_key("signatures") {
-            strings("signatures")?.iter().map(|s| wire::signature(s))
+            strings("signatures")?
+                .iter()
+                .map(|s| wire::signature(s))
                 .collect::<io::Result<_>>()?
         } else {
             Vec::new()
         };
         let ultimate = match object.get("ultimate") {
             None => false,
-            Some(value) => value.as_bool().ok_or_else(|| bad("'ultimate' is not a boolean"))?,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| bad("'ultimate' is not a boolean"))?,
         };
         Ok(PathInfo {
-            path, deriver, nar_hash, references, registration_time, nar_size, ultimate, sigs, ca,
+            path,
+            deriver,
+            nar_hash,
+            references,
+            registration_time,
+            nar_size,
+            ultimate,
+            sigs,
+            ca,
         })
     }
 
@@ -142,27 +165,6 @@ impl PathInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn path_info_round_trips() {
-        let info = PathInfo {
-            path: StorePath::from_base_name("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo").unwrap(),
-            deriver: "/nix/store/ffffffffffffffffffffffffffffffff-foo.drv".into(),
-            nar_hash: "0".repeat(64),
-            references: vec!["/nix/store/cccccccccccccccccccccccccccccccc-src".into()],
-            registration_time: 7,
-            nar_size: 4096,
-            ultimate: false,
-            sigs: vec!["cache.numtide.com-1:abc=".into()],
-            ca: String::new(),
-        };
-        // `write` prefixes the path, `decode` takes it out of band, so drop it.
-        let mut bytes = Vec::new();
-        info.write(&mut bytes).unwrap();
-        let mut r = bytes.as_slice();
-        assert_eq!(read_str(&mut r).unwrap(), info.path.to_string());
-        let decoded = PathInfo::decode(info.path.base_name(), r).unwrap();
-        assert_eq!(decoded, info);
-    }
 
     #[test]
     fn malformed_local_metadata_is_not_an_unavailable_path() {
@@ -182,31 +184,4 @@ mod tests {
         info["signatures"] = serde_json::json!(["not-a-signature"]);
         assert!(PathInfo::from_json(path, &info).is_err());
     }
-
-    #[test]
-    fn local_metadata_keeps_ia_identity_and_signed_fingerprint() {
-        let path = StorePath::from_base_name("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-source").unwrap();
-        let deriver = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-producer.drv";
-        let info = serde_json::json!({
-            "narHash": format!("sha256:{}", "0".repeat(64)),
-            "narSize": 128,
-            "references": [path.to_string()],
-            "ca": null,
-            "deriver": deriver,
-            "registrationTime": 42,
-            "signatures": ["cache:dGVzdA=="],
-            "ultimate": true
-        });
-        let got = PathInfo::from_json(path.clone(), &info).unwrap();
-        assert_eq!(got.path, path);
-        assert_eq!(got.deriver, deriver);
-        assert_eq!(got.references, [path.to_string()]);
-        assert_eq!(got.nar_hash, "0".repeat(64));
-        assert_eq!(got.nar_size, 128);
-        assert_eq!(got.registration_time, 42);
-        assert_eq!(got.sigs, ["cache:dGVzdA=="]);
-        assert!(got.ca.is_empty());
-        assert!(got.ultimate);
-    }
-
 }

@@ -147,9 +147,9 @@ pub fn locate_in_store(
                 })));
             }
             // `null` is what `nix path-info` prints for a path that is not valid.
-            let v = info.get(&full).ok_or_else(|| {
-                CrateError::Protocol(format!("nix path-info omitted '{p}'"))
-            })?;
+            let v = info
+                .get(&full)
+                .ok_or_else(|| CrateError::Protocol(format!("nix path-info omitted '{p}'")))?;
             if v.is_null() {
                 return Ok(None);
             }

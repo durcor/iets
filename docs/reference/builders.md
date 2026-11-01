@@ -45,12 +45,16 @@ In classic mode, iets falls back to the real nix.
   memory. After hashing, iets checks that the NAR still gives the planned
   store path. If the tree changed since evaluation, the build fails.
 - **Sources the evaluation did not add** (under a derivation read from the
-  store, or a path pinned with `builtins.storePath`) go to one
-  `nix path-info --json` call. A path the local store has as a recursive
-  sha256 source or a text file is read from `/nix/store`. Anything else,
-  such as an input-addressed build output or a path that is not valid
-  locally, is left to the daemon. Nix treats such an `inputSrcs` entry the
-  same way: it must be valid or substitutable on the builder.
+  store, or a path pinned with `builtins.storePath`) are queried with
+  `nix path-info --json`. A locally valid path is copied with its original
+  identity, NAR hash and size, references, deriver, signatures and content
+  address, including an input-addressed build output whose `ca` is null.
+  iets follows runtime references, not the producer derivation or its build
+  inputs, and asks the destination before locating each new reference.
+  Already-valid members need no local metadata or bytes. References register
+  before referrers; a self-reference registers only once. Only a path that
+  is genuinely unavailable locally is left to the builder's substituters.
+  Malformed metadata is an error, not a substitution miss.
 
 iets walks the closure once and reads nothing during the walk. It asks the
 daemon which paths it has, then finds and hashes only the sources the daemon
@@ -134,9 +138,11 @@ rejects the op.
    the references of the missing roots in one call, then about whatever is
    still open in one last call. A warm daemon answers in one or two small
    calls; a cold one costs two more round trips than one call over the whole
-   plan. Then, off the wire, iets finds and hashes the missing sources: what the evaluation
-   read and the `--source` overrides first, then one
-   `nix path-info --json` batch for the rest. The flake fetcher uses the
+   plan. Then, off the wire, iets finds and hashes the missing native sources:
+   what the evaluation read and the `--source` overrides first. Other sources
+   retain their stored metadata from `nix path-info --json` batches, with
+   further destination queries and metadata batches for newly found references.
+   The flake fetcher uses the
    same request with the substitute flag on, for a locked input missing
    from the eval store (`docs/reference/flakes.md`).
 3. **`BuildPathsWithResults`** on the missing sources iets cannot produce
@@ -145,12 +151,13 @@ rejects the op.
    hold these before the derivations that name them. Skipped when there
    are none. A failed substitution ends the run with the daemon's message.
    `nix build` does the same for an `inputSrcs` entry it does not own.
-4. **`AddMultipleToStore`** of the missing paths, in one framed stream, in
-   plan order. Each entry is a `ValidPathInfo` in the 1.16 layout the
-   daemon expects for this request, followed by the NAR: no deriver, the
-   NAR hash and size of iets's own dump, registration time 0,
-   `ultimate = false`, no signatures, and the content address, which the
-   daemon computes again and checks:
+4. **`AddMultipleToStore`** of the missing paths, in one framed stream, with
+   references before referrers. Each entry is a `ValidPathInfo` in the 1.16
+   layout the daemon expects, followed by its NAR. Stored paths retain their
+   original metadata and signatures, but `ultimate` is cleared: copying is
+   not a local build. For native evaluation objects, iets writes no deriver,
+   its own NAR hash and size, registration time 0, `ultimate = false`, no
+   signatures, and the content address, which the daemon checks:
 
    | Path | Content address |
    |:---|:---|
@@ -158,8 +165,10 @@ rejects the op.
    | a `builtins.toFile` path | `text:sha256:<flat hash>` plus references |
    | a `.drv` | `text:sha256:<sha256(aterm)>`, references = inputSrcs + inputDrvs |
 
-   The daemon accepts a content-addressed path from an untrusted client,
-   because it needs no signature.
+   The daemon accepts a content-addressed path from an untrusted client
+   without a signature. An input-addressed source needs a signature by a key
+   the destination already trusts, or an already-trusted connection. iets
+   does not change that authorization or manufacture a content address.
 5. **`BuildPathsWithResults`** in normal mode on `<root drv>!<out1,out2>`
    (`!*` without `--out`), the `DerivedPath` string that protocol >= 1.30
    reads, one entry per root in the same request. A failed status is that
@@ -261,12 +270,13 @@ endpoint refuses with `UNIMPLEMENTED`. That is why `nix` needs
 
 ### `write` tokens
 
-`write`, the role an OIDC token usually gets, may request builds and
-import **signed** paths. Everything iets uploads is content-addressed, so
-the daemon computes the address again and accepts it without a signature.
-Only an unsigned, input-addressed path (an output built locally) needs the
-`trusted` role, which iets never needs, because it uploads only sources and
-derivations.
+`write`, the role an OIDC token usually gets, may request builds and import
+**signed** paths. Native source trees, `builtins.toFile` texts and derivations
+are content-addressed, so the service accepts them without signatures.
+Locally built input-addressed sources keep their original signatures and
+need a key the service already trusts. Unsigned input-addressed paths need
+an already-authorized `trusted` role. iets neither grants that role nor
+changes the service's trust settings.
 
 Outputs land in the farm's binary cache. `--fetch-to` restores them into a
 directory. Without an out-link (`iets build -o`, or `result` under the
@@ -317,5 +327,3 @@ when its metadata changed (`docs/explanation/caching.md`).
 - During a large upload, an error shows only after the whole stream is
   sent, because iets does not read the daemon's stderr while it streams.
 - Over `grpc://`, ^C does not cancel the build on the server.
-- A flat fixed-output source (`builtins.path { recursive = false; }`) has
-  no recorded origin, so the daemon must substitute it.

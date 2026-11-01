@@ -32,10 +32,17 @@ fn path_info(s: &Store, path: &str, b: Option<&Builder>) -> Value {
 
 /// Registration time is destination-local; ultimate must not travel with a copy.
 fn identity(info: &Value) -> Value {
-    ["ca", "narHash", "narSize", "references", "deriver", "signatures"]
-        .into_iter()
-        .map(|key| (key.to_string(), info[key].clone()))
-        .collect()
+    [
+        "ca",
+        "narHash",
+        "narSize",
+        "references",
+        "deriver",
+        "signatures",
+    ]
+    .into_iter()
+    .map(|key| (key.to_string(), info[key].clone()))
+    .collect()
 }
 
 fn valid(s: &Store, path: &str, b: Option<&Builder>) -> bool {
@@ -165,7 +172,11 @@ in { inherit leaf yaml buildOnly; }
         }
         let build_only: String = serde_json::from_slice(
             &ok(s.nix("nix-instantiate").arg(&producers).args([
-                "--eval", "--strict", "--json", "-A", "buildOnly",
+                "--eval",
+                "--strict",
+                "--json",
+                "-A",
+                "buildOnly",
             ]))
             .stdout,
         )
@@ -194,7 +205,9 @@ in { inherit leaf yaml buildOnly; }
         for source in &sources {
             assert!(source.info["ca"].is_null(), "must be input-addressed");
             assert!(
-                source.info["signatures"].as_array().is_none_or(Vec::is_empty),
+                source.info["signatures"]
+                    .as_array()
+                    .is_none_or(Vec::is_empty),
                 "the trusted import must work without signatures"
             );
             assert!(valid(s, &source.path, None));
@@ -222,7 +235,10 @@ in { inherit leaf yaml buildOnly; }
             sources[1].bytes,
             format!("dependency: {leaf}\nself: {yaml}\n").as_bytes()
         );
-        assert_eq!(references(&sources[1].info), sorted([leaf.clone(), yaml.clone()]));
+        assert_eq!(
+            references(&sources[1].info),
+            sorted([leaf.clone(), yaml.clone()])
+        );
         let consumer_body = r#"let
   pinned = builtins.storePath "@YAML@";
   input = builtins.toFile "source-transfer-input.txt" "${pinned}\n";
@@ -249,13 +265,22 @@ in derivation {
         .replace("@YAML@", &yaml);
         // Nix is only the fixture oracle. The transfer and the consumer build
         // below use iets; the eval-time text must be registered after its refs.
-        let oracle = s.write("oracle-consumer.nix", &consumer_body.replace("@NAME@", "oracle-consumer"));
+        let oracle = s.write(
+            "oracle-consumer.nix",
+            &consumer_body.replace("@NAME@", "oracle-consumer"),
+        );
         let drv = stdout(&ok(s.nix("nix-instantiate").arg(&oracle)));
         let input = s.nix_store(&["-q", "--references", &drv]);
-        assert!(!input.contains('\n'), "one raw input source, not producer inputDrvs");
+        assert!(
+            !input.contains('\n'),
+            "one raw input source, not producer inputDrvs"
+        );
         sources.push(Source::read(s, input.clone()));
         assert_eq!(sources[2].bytes, format!("{yaml}\n").as_bytes());
-        assert_eq!(references(&sources[2].info), [yaml.clone()]);
+        assert_eq!(
+            references(&sources[2].info).as_slice(),
+            std::slice::from_ref(&yaml)
+        );
         let expected = format!(
             "manifest: {input}\nsource: {yaml}\ndependency: {leaf}\nself: {yaml}\nenabled: true\nmode: dual-function\n"
         )
@@ -297,7 +322,10 @@ in derivation {
             sorted(self.sources.iter().map(|source| source.path.clone()))
         );
         for path in &self.forbidden {
-            assert!(!valid(s, path, Some(b)), "copied producer build closure: {path}");
+            assert!(
+                !valid(s, path, Some(b)),
+                "copied producer build closure: {path}"
+            );
         }
     }
 }
@@ -313,13 +341,23 @@ impl Consumer {
     fn build(&self, s: &Store, b: &Builder, f: &Fixture) {
         let out = ok(s
             .iets()
-            .args(["build", "--builder", &b.url(), "--impure", "--no-tracing-cache"])
+            .args([
+                "build",
+                "--builder",
+                &b.url(),
+                "--impure",
+                "--no-tracing-cache",
+            ])
             .arg(&self.file));
         self.assert_result(s, b, f, &out);
     }
 
     fn assert_result(&self, s: &Store, b: &Builder, f: &Fixture, out: &Output) {
-        assert_eq!(stdout(out), self.out, "original input-addressed output identity");
+        assert_eq!(
+            stdout(out),
+            self.out,
+            "original input-addressed output identity"
+        );
         assert_eq!(fs::read(b.real(&self.out)).unwrap(), f.expected);
         let info = path_info(s, &self.out, Some(b));
         assert!(info["ca"].is_null());
@@ -336,7 +374,7 @@ impl Consumer {
 
 #[test]
 fn a_locally_built_yaml_reaches_a_cold_unsubstituted_builder() {
-    let s = store!();
+    let s = store!(("keep-derivations", "false"));
     let fixture = Fixture::new(&s, false);
     let consumer = fixture.consumer(&s, "source-transfer-simple-consumer");
     let b = s.builder("cold", &[("require-sigs", "true")]);
@@ -347,11 +385,14 @@ fn a_locally_built_yaml_reaches_a_cold_unsubstituted_builder() {
 
 #[test]
 fn a_transitive_self_referencing_closure_precedes_eval_text_cold_and_warm() {
-    let s = store!();
+    let s = store!(("keep-derivations", "false"));
     let fixture = Fixture::new(&s, true);
     let consumer = fixture.consumer(&s, "source-transfer-closure-consumer");
     for preseed_leaf in [false, true] {
-        let b = s.builder(if preseed_leaf { "partial" } else { "cold" }, &[("require-sigs", "true")]);
+        let b = s.builder(
+            if preseed_leaf { "partial" } else { "cold" },
+            &[("require-sigs", "true")],
+        );
         for source in &fixture.sources {
             assert!(!valid(&s, &source.path, Some(&b)));
         }
@@ -384,7 +425,7 @@ fn a_transitive_self_referencing_closure_precedes_eval_text_cold_and_warm() {
 
 #[test]
 fn eval_jobs_streams_the_local_source_closure_before_native_builds() {
-    let s = store!();
+    let s = store!(("keep-derivations", "false"));
     let fixture = Fixture::new(&s, true);
     let first = fixture.consumer(&s, "source-transfer-stream-first");
     let second = fixture.consumer(&s, "source-transfer-stream-second");
@@ -408,7 +449,14 @@ fn eval_jobs_streams_the_local_source_closure_before_native_builds() {
     for _ in 0..2 {
         let out = ok(s
             .iets()
-            .args(["eval-jobs", "--eval-store", &b.url(), "--workers", "2", "--impure"])
+            .args([
+                "eval-jobs",
+                "--eval-store",
+                &b.url(),
+                "--workers",
+                "2",
+                "--impure",
+            ])
             .arg(&jobs));
         let mut lines: Vec<Value> = stdout(&out)
             .lines()
@@ -420,7 +468,10 @@ fn eval_jobs_streams_the_local_source_closure_before_native_builds() {
             assert_eq!(line["attr"], attr);
             assert_eq!(line["drvPath"], consumer.drv);
             assert_eq!(line["outputs"], json!({ "out": consumer.out }));
-            assert!(!valid(&s, &consumer.out, Some(&b)), "eval-jobs must not build");
+            assert!(
+                !valid(&s, &consumer.out, Some(&b)),
+                "eval-jobs must not build"
+            );
             assert_eq!(fs::read(b.real(&consumer.drv)).unwrap(), consumer.drv_bytes);
         }
         fixture.assert_destination(&s, &b);
@@ -434,6 +485,7 @@ fn a_genuinely_missing_source_is_still_substituted() {
     let s = store!();
     let input: String = serde_json::from_slice(
         &ok(s.nix("nix-instantiate").args([
+            "--read-write-mode",
             "--eval",
             "--strict",
             "--json",
@@ -445,7 +497,12 @@ fn a_genuinely_missing_source_is_still_substituted() {
     .unwrap();
     let source = Source::read(&s, input.clone());
     assert_eq!(source.bytes, b"enabled: true\nmode: cached\n");
-    assert!(source.info["ca"].as_str().unwrap().starts_with("text:sha256:"));
+    assert!(
+        source.info["ca"]
+            .as_str()
+            .unwrap()
+            .starts_with("text:sha256:")
+    );
     let fixture = Fixture {
         expected: source.bytes.clone(),
         consumer_body: plain_consumer(&input),
@@ -459,7 +516,10 @@ fn a_genuinely_missing_source_is_still_substituted() {
     ok(s.nix("nix").args(["copy", "--to", &cache, &input]));
     ok(s.nix("nix-store").args(["--delete", &consumer.drv, &input]));
     assert!(!valid(&s, &input, None));
-    let b = s.builder("substituting", &[("substituters", &cache), ("require-sigs", "true")]);
+    let b = s.builder(
+        "substituting",
+        &[("substituters", &cache), ("require-sigs", "true")],
+    );
     assert!(!valid(&s, &input, Some(&b)));
     assert!(!valid(&s, &consumer.out, Some(&b)));
     consumer.build(&s, &b, &fixture);
@@ -467,7 +527,7 @@ fn a_genuinely_missing_source_is_still_substituted() {
 
 #[test]
 fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_signed_ia_and_ca() {
-    let s = store!();
+    let s = store!(("keep-derivations", "false"));
     let mut fixture = Fixture::new(&s, false);
     let consumer = fixture.consumer(&s, "source-transfer-untrusted-consumer");
     let secret_key = s.dir().join("fixture-signing-key.sec");
@@ -480,7 +540,10 @@ fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_signed_ia_and_ca() {
     let public_key = public_key.trim();
     let b = s.builder(
         "trust-boundary",
-        &[("require-sigs", "true"), ("trusted-public-keys", public_key)],
+        &[
+            ("require-sigs", "true"),
+            ("trusted-public-keys", public_key),
+        ],
     );
 
     // As in the existing SSH transport fixture, the executable launcher avoids
@@ -490,7 +553,7 @@ fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_signed_ia_and_ca() {
         "untrusted-bin/ssh",
         &format!(
             "#!/bin/sh\nexec '{}' --store '{}' --extra-experimental-features daemon-trust-override --stdio --force-untrusted --option sandbox-paths /nix/store --option require-sigs true --option trusted-public-keys '{}'\n",
-            e2e::resolved("nix-daemon").display(),
+            e2e::which("nix-daemon").unwrap().display(),
             b.store(),
             public_key
         ),
@@ -508,6 +571,7 @@ fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_signed_ia_and_ca() {
     // rejection assertion below, nor can rejecting every unsigned path.
     let input: String = serde_json::from_slice(
         &ok(s.nix("nix-instantiate").args([
+            "--read-write-mode",
             "--eval",
             "--strict",
             "--json",
@@ -518,7 +582,12 @@ fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_signed_ia_and_ca() {
     )
     .unwrap();
     let source = Source::read(&s, input.clone());
-    assert!(source.info["ca"].as_str().unwrap().starts_with("text:sha256:"));
+    assert!(
+        source.info["ca"]
+            .as_str()
+            .unwrap()
+            .starts_with("text:sha256:")
+    );
     let control = Fixture {
         expected: b"enabled: true\nmode: untrusted-ca\n".to_vec(),
         consumer_body: plain_consumer(&input),
@@ -561,8 +630,15 @@ fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_signed_ia_and_ca() {
     let rejected = s
         .iets()
         .env("PATH", &path)
-        .args(["eval-jobs", "--eval-store", url, "--workers", "1", "--impure"])
-        .arg(jobs)
+        .args([
+            "eval-jobs",
+            "--eval-store",
+            url,
+            "--workers",
+            "1",
+            "--impure",
+        ])
+        .arg(&jobs)
         .output()
         .unwrap();
     assert!(
@@ -605,4 +681,46 @@ fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_signed_ia_and_ca() {
         .arg(&consumer.file));
     // This checks the exact nonempty signatures, not just successful import.
     consumer.assert_result(&s, &b, &fixture, &accepted);
+
+    // Signed streaming registration must also import into an absent target,
+    // rather than succeeding because the fixed build already copied it.
+    let stream = s.builder(
+        "signed-stream",
+        &[
+            ("require-sigs", "true"),
+            ("trusted-public-keys", public_key),
+        ],
+    );
+    let stream_ssh = s.write(
+        "signed-untrusted-bin/ssh",
+        &fs::read_to_string(&ssh)
+            .unwrap()
+            .replace(&b.store(), &stream.store()),
+    );
+    fs::set_permissions(&stream_ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    let stream_path = format!(
+        "{}:{}",
+        stream_ssh.parent().unwrap().display(),
+        std::env::var("PATH").unwrap()
+    );
+    assert!(!valid(&s, &fixture.input, Some(&stream)));
+    assert!(!valid(&s, &consumer.drv, Some(&stream)));
+    ok(s.iets()
+        .env("PATH", stream_path)
+        .args([
+            "eval-jobs",
+            "--eval-store",
+            url,
+            "--workers",
+            "1",
+            "--impure",
+        ])
+        .arg(&jobs));
+    fixture.assert_destination(&s, &stream);
+    assert_eq!(
+        fs::read(stream.real(&consumer.drv)).unwrap(),
+        consumer.drv_bytes
+    );
+    assert!(!valid(&s, &consumer.out, Some(&stream)));
+    consumer.build(&s, &stream, &fixture);
 }

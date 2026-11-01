@@ -31,11 +31,11 @@ use crate::store::path::StorePath;
 
 use super::super::copy::topo_sort;
 use super::super::event::{Event, Log, Phase};
+use super::super::path_info::PathInfo;
 use super::super::plan::{Object, Plan};
 use super::super::worker::Connection;
 use super::super::worker::wire::{write_object, write_u64};
 use super::drvwire::{BUILD_PROTOCOL, BuildResult, write_basic_derivation};
-use super::super::path_info::PathInfo;
 use super::sched::{Answer, Sched};
 use super::{Client, Headers, c_request, first_line, gone_away, proto};
 
@@ -904,15 +904,30 @@ mod tests {
         let b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-b";
         let text = StorePath::from_base_name("cccccccccccccccccccccccccccccccc-text").unwrap();
         let root = StorePath::from_base_name("dddddddddddddddddddddddddddddddd-root.drv").unwrap();
-        let stored = Object::Stored { at: SrcPath::fs("/unused", None), info: info(a, &[a, b]) };
-        let leaf = Object::Stored { at: SrcPath::fs("/unused", None), info: info(b, &[]) };
-        let text_object = Object::source(text.clone(), SourceOrigin::text(
-            b"pinned output".to_vec(), BTreeSet::from([stored.store_path().clone()]),
-        )).unwrap();
-        let drv = Object::drv(root.clone(), Arc::new(Vec::new()), BTreeSet::from([text.clone()]));
+        let stored = Object::Stored {
+            at: SrcPath::fs("/unused", None),
+            info: info(a, &[a, b]),
+        };
+        let leaf = Object::Stored {
+            at: SrcPath::fs("/unused", None),
+            info: info(b, &[]),
+        };
+        let text_object = Object::source(
+            text.clone(),
+            SourceOrigin::text(
+                b"pinned output".to_vec(),
+                BTreeSet::from([stored.store_path().clone()]),
+            ),
+        )
+        .unwrap();
+        let drv = Object::drv(
+            root.clone(),
+            Arc::new(Vec::new()),
+            BTreeSet::from([text.clone()]),
+        );
         let unrelated = Object::Stored {
             at: SrcPath::fs("/unused", None),
-            info: info("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-unrelated", &[]),
+            info: info("ffffffffffffffffffffffffffffffff-unrelated", &[]),
         };
         let mut objects = Objects::default();
         objects.extend(&[&drv, &stored, &unrelated, &text_object, &leaf]);

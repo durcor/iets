@@ -283,5 +283,4 @@ mod tests {
         assert!(!res.success());
         assert_eq!(res.error_msg, "builder failed");
     }
-
 }

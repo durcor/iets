@@ -143,14 +143,18 @@ impl Object {
     pub(crate) fn reference_names(&self) -> impl Iterator<Item = &str> {
         let (paths, names): (Option<&BTreeSet<StorePath>>, &[String]) = match self {
             Object::Drv { references, .. } => (Some(references), &[]),
-            Object::Source { kind: SourceKind::Text { references }, .. } => {
-                (Some(references), &[])
-            }
+            Object::Source {
+                kind: SourceKind::Text { references },
+                ..
+            } => (Some(references), &[]),
             Object::Stored { info, .. } => (None, &info.references),
             Object::Source { .. } => (None, &[]),
         };
-        paths.into_iter().flatten().map(StorePath::base_name)
-            .chain(names.iter().map(|name| name.rsplit('/').next().expect("store path")))
+        paths.into_iter().flatten().map(StorePath::base_name).chain(
+            names
+                .iter()
+                .map(|name| name.rsplit('/').next().expect("store path")),
+        )
     }
 }
 
@@ -269,8 +273,14 @@ impl Plan {
                 Object::Source { .. } | Object::Stored { .. } => None,
             })
             .chain(self.origins.iter().filter_map(|(p, origin)| {
-                Some((p, origin.text_refs()?.iter()
-                    .filter_map(|r| planned.get(r).copied()).collect()))
+                Some((
+                    p,
+                    origin
+                        .text_refs()?
+                        .iter()
+                        .filter_map(|r| planned.get(r).copied())
+                        .collect(),
+                ))
             }))
             .collect();
         let roots = roots
@@ -296,8 +306,11 @@ impl Plan {
         query: &mut dyn FnMut(&[StorePath]) -> Result<HashSet<String>>,
     ) -> Result<Resolved> {
         resolve_sources(
-            missing, &|p| self.origins.get(p).cloned(), locate,
-            &|p| valid.contains(p.base_name()), query,
+            missing,
+            &|p| self.origins.get(p).cloned(),
+            locate,
+            &|p| valid.contains(p.base_name()),
+            query,
         )
     }
 }
@@ -342,19 +355,30 @@ pub(crate) fn resolve_sources(
 ) -> Result<Resolved> {
     let mut resolved = Resolved::default();
     let mut seen = HashSet::new();
-    let mut pending: Vec<StorePath> = missing.iter()
-        .filter(|p| !known(p) && seen.insert((*p).clone())).cloned().collect();
+    let mut pending: Vec<StorePath> = missing
+        .iter()
+        .filter(|p| !known(p) && seen.insert((*p).clone()))
+        .cloned()
+        .collect();
     let mut native_paths = Vec::new();
     let mut native_origins = Vec::new();
     while !pending.is_empty() {
-        let mut infos: Vec<Option<LocatedSource>> = pending.iter()
-            .map(|p| origin(p).map(LocatedSource::Source)).collect();
-        let unknown: Vec<StorePath> = pending.iter().zip(&infos)
-            .filter(|(_, info)| info.is_none()).map(|(p, _)| p.clone()).collect();
+        let mut infos: Vec<Option<LocatedSource>> = pending
+            .iter()
+            .map(|p| origin(p).map(LocatedSource::Source))
+            .collect();
+        let unknown: Vec<StorePath> = pending
+            .iter()
+            .zip(&infos)
+            .filter(|(_, info)| info.is_none())
+            .map(|(p, _)| p.clone())
+            .collect();
         if !unknown.is_empty() {
             let found = locate(&unknown)?;
             if found.len() != unknown.len() {
-                return Err(Error::Plan("locator returned the wrong number of sources".into()));
+                return Err(Error::Plan(
+                    "locator returned the wrong number of sources".into(),
+                ));
             }
             resolved.store_sources += found.iter().filter(|info| info.is_some()).count();
             let mut found = found.into_iter();
@@ -384,7 +408,10 @@ pub(crate) fn resolve_sources(
                 }
                 Some(LocatedSource::Stored { at, mut info }) => {
                     if info.path != p {
-                        return Err(Error::Plan(format!("locator returned '{}' for '{p}'", info.path)));
+                        return Err(Error::Plan(format!(
+                            "locator returned '{}' for '{p}'",
+                            info.path
+                        )));
                     }
                     for reference in &info.references {
                         enqueue(StorePath::parse(reference)?);
@@ -402,7 +429,9 @@ pub(crate) fn resolve_sources(
         pending = next;
     }
     let paths = native_paths.iter().collect::<Vec<_>>();
-    resolved.objects.extend(hash_sources(&paths, &native_origins)?);
+    resolved
+        .objects
+        .extend(hash_sources(&paths, &native_origins)?);
     Ok(resolved)
 }
 
@@ -413,7 +442,9 @@ pub(crate) fn resolve_sources(
 pub(crate) fn order_objects<'a>(objects: &[&'a Object]) -> Vec<&'a Object> {
     let mut by_name = HashMap::with_capacity(objects.len());
     for object in objects {
-        by_name.entry(object.store_path().base_name()).or_insert(*object);
+        by_name
+            .entry(object.store_path().base_name())
+            .or_insert(*object);
     }
     let mut seen = HashSet::with_capacity(by_name.len());
     let mut out = Vec::with_capacity(by_name.len());
@@ -730,24 +761,35 @@ mod tests {
         let queried = RefCell::new(Vec::new());
         let locate = |paths: &[StorePath]| {
             located.borrow_mut().extend(paths.iter().cloned());
-            paths.iter().map(|p| {
-                assert!(p == &a || p == &b, "held members and derivers need no local metadata");
-                let references = if p == &a {
-                    vec![a.to_string(), b.to_string(), held.to_string()]
-                } else {
-                    vec![]
-                };
-                Ok(Some(LocatedSource::Stored {
-                    // A stored source is never dumped to recover its known hash.
-                    at: SrcPath::fs("/does-not-exist", None),
-                    info: PathInfo {
-                        path: p.clone(), deriver: deriver.to_string(),
-                        nar_hash: "0".repeat(64), references, registration_time: 7,
-                        nar_size: 128, ultimate: true,
-                        sigs: vec!["cache:dGVzdA==".into()], ca: String::new(),
-                    },
-                }))
-            }).collect::<Result<Vec<_>>>()
+            paths
+                .iter()
+                .map(|p| {
+                    assert!(
+                        p == &a || p == &b,
+                        "held members and derivers need no local metadata"
+                    );
+                    let references = if p == &a {
+                        vec![a.to_string(), b.to_string(), held.to_string()]
+                    } else {
+                        vec![]
+                    };
+                    Ok(Some(LocatedSource::Stored {
+                        // A stored source is never dumped to recover its known hash.
+                        at: SrcPath::fs("/does-not-exist", None),
+                        info: PathInfo {
+                            path: p.clone(),
+                            deriver: deriver.to_string(),
+                            nar_hash: "0".repeat(64),
+                            references,
+                            registration_time: 7,
+                            nar_size: 128,
+                            ultimate: true,
+                            sigs: vec!["cache:dGVzdA==".into()],
+                            ca: String::new(),
+                        },
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()
         };
         let resolved = resolve_sources(
             std::slice::from_ref(&text),
@@ -756,19 +798,31 @@ mod tests {
             &|_| false,
             &mut |paths| {
                 queried.borrow_mut().extend(paths.iter().cloned());
-                Ok(paths.iter().filter(|p| *p == &held)
-                    .map(|p| p.base_name().to_string()).collect())
+                Ok(paths
+                    .iter()
+                    .filter(|p| *p == &held)
+                    .map(|p| p.base_name().to_string())
+                    .collect())
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(*located.borrow(), [a.clone(), b.clone()]);
         assert_eq!(*queried.borrow(), [a.clone(), b.clone(), held.clone()]);
         assert!(resolved.substitute.is_empty());
         let refs: Vec<_> = resolved.objects.iter().collect();
         let ordered = order_objects(&refs);
-        assert_eq!(ordered.iter().map(|o| o.store_path()).collect::<Vec<_>>(), [&b, &a, &text]);
-        let Object::Stored { info, .. } = ordered[1] else { panic!("stored identity") };
+        assert_eq!(
+            ordered.iter().map(|o| o.store_path()).collect::<Vec<_>>(),
+            [&b, &a, &text]
+        );
+        let Object::Stored { info, .. } = ordered[1] else {
+            panic!("stored identity")
+        };
         assert_eq!(info.deriver, deriver.to_string());
-        assert_eq!(info.references, [a.to_string(), b.to_string(), held.to_string()]);
+        assert_eq!(
+            info.references,
+            [a.to_string(), b.to_string(), held.to_string()]
+        );
         assert_eq!(info.sigs, ["cache:dGVzdA=="]);
         assert!(info.ca.is_empty());
         assert!(!info.ultimate);
@@ -780,10 +834,12 @@ mod tests {
         let root = node("root.drv", &[&text]);
         let plan = Plan {
             sources: vec![leaf.clone(), text.clone()],
-            origins: HashMap::from([(text, SourceOrigin::text(
-                b"leaf".to_vec(), BTreeSet::from([leaf]),
-            ))]),
-            drvs: vec![root], store_drvs: 0,
+            origins: HashMap::from([(
+                text,
+                SourceOrigin::text(b"leaf".to_vec(), BTreeSet::from([leaf])),
+            )]),
+            drvs: vec![root],
+            store_drvs: 0,
         };
         let (_, missing) = calls(&plan, &[], None);
         assert_eq!(missing, ["leaf", "root.drv", "text"]);

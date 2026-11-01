@@ -225,8 +225,11 @@ impl Uploader for StreamUpload {
         let valid = b.query_valid(&paths, on_event)?;
 
         let t1 = Instant::now();
-        let missing_sources: Vec<StorePath> = srcs.iter()
-            .filter(|p| !valid.contains(p.base_name())).cloned().collect();
+        let missing_sources: Vec<StorePath> = srcs
+            .iter()
+            .filter(|p| !valid.contains(p.base_name()))
+            .cloned()
+            .collect();
         let locate = |paths: &[StorePath]| locate::locate_in_store(paths, &HashMap::new());
         let resolved = plan::resolve_sources(
             &missing_sources,
@@ -266,7 +269,8 @@ impl Uploader for StreamUpload {
         let ordered = plan::order_objects(&refs);
         st.bytes = b.add_objects(&ordered, on_event)?;
         st.added = ordered.len();
-        self.valid.extend(objects.iter().map(|o| o.store_path().clone()));
+        self.valid
+            .extend(objects.iter().map(|o| o.store_path().clone()));
         self.valid.extend(resolved.substitute);
         self.valid.extend(srcs);
         self.valid.extend(drvs.into_iter().map(|d| d.0));
