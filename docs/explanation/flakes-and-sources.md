@@ -183,11 +183,14 @@ other path is left to the kernel.
 
 A direct file import uses the resolved target as its cache identity and
 relative-import base. A directory import resolves the directory first and
-then appends `default.nix`: its target is checked for visibility without
-changing that directory's relative-import base. Thus even a symlinked
-`default.nix` behaves like Nix, without bypassing the virtual-tree filter.
-The same walker reads symlink targets from packed input-store trees, so clean
-and pinned sources need not be materialized to preserve import identity.
+then appends `default.nix`: that path remains its compilation/cache identity
+and relative-import base, while the resolved target supplies the bytes.
+Ordinary and scoped imports carry the checked byte accessor into compilation
+instead of resolving the original link chain again through the input store.
+Thus even a symlinked `default.nix` behaves like Nix, without bypassing the
+virtual-tree filter. The same walker reads symlink targets from packed
+input-store trees, so clean and pinned sources need not be materialized to
+preserve import identity.
 
 A flake directory that is itself a symlink to a working tree is that
 working tree: `git.cc` opens the repository, which resolves the path. An
