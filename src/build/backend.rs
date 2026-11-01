@@ -384,8 +384,11 @@ impl Backend for Worker {
             }
             Ok(())
         };
+        // This only requests the existing waiver. The daemon grants it to an
+        // already-trusted connection, and still checks untrusted imports.
+        let copy_stored = objects.iter().any(|o| matches!(o, Object::Stored { .. }));
         self.conn
-            .add_multiple_to_store(false, &mut body, on_event)?;
+            .add_multiple_to_store(copy_stored, &mut body, on_event)?;
         let bytes = self.conn.bytes_sent() - before;
         self.t.add += t0.elapsed();
         self.t.add_paths += objects.len();

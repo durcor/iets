@@ -15,18 +15,16 @@
 //! so the same upload runs over the worker protocol and over `grpc://`.
 
 use std::collections::{HashMap, HashSet};
-use std::slice;
 use std::time::{Duration, Instant};
 
 use crate::builtins::derivation::DrvInfo;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::eval::Known;
 use crate::parallel::shared::SharedMap;
 use crate::remote::event::Event;
 use crate::remote::plan::{self, Locator, Node, Object, Plan};
 use crate::store::locate;
 use crate::store::path::StorePath;
-use crate::store::source::SourceOrigin;
 
 use super::backend::{Backend, Drv, Phase};
 
@@ -103,9 +101,12 @@ impl Uploader for PlanUpload<'_> {
         let t0 = Instant::now();
         let plan = self.plan;
         let mut queried = 0;
+        let mut valid = self.answered.clone().unwrap_or_default();
         let missing = plan.query_missing(roots, self.answered.as_ref(), &mut |paths| {
             queried += paths.len();
-            b.query_valid(&paths.iter().collect::<Vec<_>>(), on_event)
+            let held = b.query_valid(&paths.iter().collect::<Vec<_>>(), on_event)?;
+            valid.extend(held.iter().cloned());
+            Ok(held)
         })?;
         let missing_sources: Vec<StorePath> = plan
             .sources
@@ -120,9 +121,12 @@ impl Uploader for PlanUpload<'_> {
             .collect();
 
         let t1 = Instant::now();
-        let resolved = plan.resolve(&missing_sources, self.locate)?;
+        let resolved = plan.resolve(&missing_sources, self.locate, &valid, &mut |paths| {
+            queried += paths.len();
+            b.query_valid(&paths.iter().collect::<Vec<_>>(), on_event)
+        })?;
         b.note_upload(Phase {
-            missing: missing_sources.len() + missing_drvs.len(),
+            missing: resolved.objects.len() + resolved.substitute.len() + missing_drvs.len(),
             resolve: t1.elapsed(),
             resolve_paths: resolved.objects.len(),
             store_sources: resolved.store_sources,
@@ -130,7 +134,8 @@ impl Uploader for PlanUpload<'_> {
 
         b.substitute(&resolved.substitute, on_event)?;
 
-        let missing: Vec<&Object> = resolved.objects.iter().chain(missing_drvs).collect();
+        let objects: Vec<&Object> = resolved.objects.iter().chain(missing_drvs).collect();
+        let missing = plan::order_objects(&objects);
         let bytes = b.add_objects(&missing, on_event)?;
         Ok(Stats {
             batches: 1,
@@ -196,16 +201,6 @@ impl StreamUpload {
         })?;
         Ok((drvs, srcs))
     }
-
-    /// Where to read a source and how it was addressed: from the evaluation,
-    /// else from the local store, else `None` and the builder substitutes it.
-    fn source_info(&self, p: &StorePath) -> Result<Option<SourceOrigin>> {
-        if let Some(origin) = self.sources.origin(p) {
-            return Ok(Some(origin));
-        }
-        let found = locate::locate_in_store(slice::from_ref(p), &HashMap::new())?;
-        Ok(found.into_iter().next().flatten())
-    }
 }
 
 impl Uploader for StreamUpload {
@@ -230,26 +225,26 @@ impl Uploader for StreamUpload {
         let valid = b.query_valid(&paths, on_event)?;
 
         let t1 = Instant::now();
-        let mut objects: Vec<Object> = Vec::new();
-        let mut substitute: Vec<StorePath> = Vec::new();
-        for p in &srcs {
-            if valid.contains(p.base_name()) {
-                continue;
-            }
-            match self.source_info(p)? {
-                Some(info) => objects.push(
-                    Object::source(p.clone(), info)
-                        .map_err(|e| Error::io(format!("cannot dump '{p}'"), e))?,
-                ),
-                None => substitute.push(p.clone()),
-            }
-        }
+        let missing_sources: Vec<StorePath> = srcs.iter()
+            .filter(|p| !valid.contains(p.base_name())).cloned().collect();
+        let locate = |paths: &[StorePath]| locate::locate_in_store(paths, &HashMap::new());
+        let resolved = plan::resolve_sources(
+            &missing_sources,
+            &|p| self.sources.origin(p),
+            &locate,
+            &|p| self.valid.contains(p) || valid.contains(p.base_name()),
+            &mut |paths| {
+                st.queried += paths.len();
+                b.query_valid(&paths.iter().collect::<Vec<_>>(), on_event)
+            },
+        )?;
+        let mut objects = resolved.objects;
         let missing_drvs = drvs
             .iter()
             .filter(|(p, _, _)| !valid.contains(p.base_name()))
             .count();
         b.note_upload(Phase {
-            missing: objects.len() + substitute.len() + missing_drvs,
+            missing: objects.len() + resolved.substitute.len() + missing_drvs,
             resolve: t1.elapsed(),
             resolve_paths: objects.len(),
             // A streamed batch never prints `--timings`.
@@ -258,8 +253,8 @@ impl Uploader for StreamUpload {
 
         // A path registers only once its references are valid, so the
         // substituted sources must land before the drvs that name them.
-        st.substituted = substitute.len();
-        b.substitute(&substitute, on_event)?;
+        st.substituted = resolved.substitute.len();
+        b.substitute(&resolved.substitute, on_event)?;
 
         for (path, aterm, references) in &drvs {
             if valid.contains(path.base_name()) {
@@ -268,8 +263,11 @@ impl Uploader for StreamUpload {
             objects.push(Object::drv(path.clone(), aterm.clone(), references.clone()));
         }
         let refs: Vec<&Object> = objects.iter().collect();
-        st.bytes = b.add_objects(&refs, on_event)?;
-        st.added = objects.len();
+        let ordered = plan::order_objects(&refs);
+        st.bytes = b.add_objects(&ordered, on_event)?;
+        st.added = ordered.len();
+        self.valid.extend(objects.iter().map(|o| o.store_path().clone()));
+        self.valid.extend(resolved.substitute);
         self.valid.extend(srcs);
         self.valid.extend(drvs.into_iter().map(|d| d.0));
         st.time = t0.elapsed();

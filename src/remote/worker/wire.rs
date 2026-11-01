@@ -317,11 +317,15 @@ impl<W: Write> Write for Counting<W> {
     }
 }
 
-/// One `ValidPathInfo` (worker-protocol.cc, the 1.16 layout `addMultipleToStore` fixes) and
-/// the NAR after it. Registration time 0 and no signatures: the daemon recomputes the content
-/// address and accepts the path on that alone.
+/// One `ValidPathInfo` (the protocol 1.16 layout) followed by its NAR.
+/// Native eval objects are content-addressed; stored objects retain the original
+/// metadata and signatures and rely on the destination's existing trust policy.
 pub fn write_object(w: &mut dyn Write, o: &Object) -> io::Result<()> {
     match o {
+        Object::Stored { at, info } => {
+            info.write(w)?;
+            write_source_nar(w, at, &info.path, info.nar_size)
+        }
         Object::Source {
             path,
             at,
@@ -356,17 +360,7 @@ pub fn write_object(w: &mut dyn Write, o: &Object) -> io::Result<()> {
                 *nar_size,
                 &ca,
             )?;
-            // The framed body declares `nar_size` before the bytes, so a tree that changed
-            // after evaluation must fail here rather than desynchronise the stream.
-            let mut counted = Counting { inner: w, bytes: 0 };
-            at.nar(&mut counted)?;
-            if counted.bytes != *nar_size {
-                return Err(io::Error::other(format!(
-                    "source '{path}' changed since evaluation: its NAR is {} bytes, not {nar_size}",
-                    counted.bytes
-                )));
-            }
-            Ok(())
+            write_source_nar(w, at, path, *nar_size)
         }
         Object::Drv {
             path,
@@ -387,6 +381,24 @@ pub fn write_object(w: &mut dyn Write, o: &Object) -> io::Result<()> {
             dump_string(aterm, w)
         }
     }
+}
+
+fn write_source_nar(
+    w: &mut dyn Write,
+    at: &crate::store::source::SrcPath,
+    path: &StorePath,
+    nar_size: u64,
+) -> io::Result<()> {
+    // Declaring a size different from the bytes would desynchronise the body.
+    let mut counted = Counting { inner: w, bytes: 0 };
+    at.nar(&mut counted)?;
+    if counted.bytes != nar_size {
+        return Err(io::Error::other(format!(
+            "source '{path}' changed since evaluation: its NAR is {} bytes, not {nar_size}",
+            counted.bytes
+        )));
+    }
+    Ok(())
 }
 
 fn write_info(

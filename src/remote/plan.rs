@@ -12,10 +12,13 @@ use crate::error::{Error, Result};
 use crate::session;
 use crate::store::drv::Derivation;
 use crate::store::hash::{self, Hash, HashAlgo, Hasher};
+use crate::store::locate::LocatedSource;
 use crate::store::nar::dump_string;
 use crate::store::path::{IngestionMethod, StorePath, make_fixed_output_path, store_dir};
 use crate::store::source::{SourceKind, SourceOrigin, SrcPath};
 use crate::syntax::symbol::FxHashMap;
+
+use super::path_info::PathInfo;
 
 /// One object the daemon must hold before it can build the root.
 #[derive(Clone, Debug)]
@@ -28,6 +31,9 @@ pub enum Object {
         nar_hash: Hash,
         nar_size: u64,
     },
+    /// An existing store object, including input-addressed outputs. Its NAR and
+    /// complete metadata are copied without changing its registered identity.
+    Stored { at: SrcPath, info: PathInfo },
     /// A derivation: its ATerm. `references` is inputSrcs plus inputDrvs, what the worker
     /// protocol needs to register the `.drv` as a text path. `hashes` is filled by
     /// `prehash_drvs` before the upload starts, so the connection only writes bytes.
@@ -128,7 +134,23 @@ impl Object {
     pub fn store_path(&self) -> &StorePath {
         match self {
             Object::Source { path, .. } | Object::Drv { path, .. } => path,
+            Object::Stored { info, .. } => &info.path,
         }
+    }
+
+    /// Referenced base names, shared by registration order and gRPC retries.
+    /// Store metadata has already validated its full reference paths.
+    pub(crate) fn reference_names(&self) -> impl Iterator<Item = &str> {
+        let (paths, names): (Option<&BTreeSet<StorePath>>, &[String]) = match self {
+            Object::Drv { references, .. } => (Some(references), &[]),
+            Object::Source { kind: SourceKind::Text { references }, .. } => {
+                (Some(references), &[])
+            }
+            Object::Stored { info, .. } => (None, &info.references),
+            Object::Source { .. } => (None, &[]),
+        };
+        paths.into_iter().flatten().map(StorePath::base_name)
+            .chain(names.iter().map(|name| name.rsplit('/').next().expect("store path")))
     }
 }
 
@@ -150,13 +172,11 @@ pub struct Plan {
 /// the daemon.
 #[derive(Debug, Default)]
 pub struct Resolved {
-    /// Hashed sources, in the order they were asked for.
+    /// Source objects, references before referrers after upload ordering.
     pub objects: Vec<Object>,
-    /// Sources the client cannot produce: not in the local store, or not content-addressed
-    /// the way v1 sends (an input-addressed build output pinned with `builtins.storePath`).
-    /// The daemon substitutes them.
+    /// Sources genuinely unavailable locally, left to the daemon to substitute.
     pub substitute: Vec<StorePath>,
-    /// Sources with no eval-time origin, read from the local store and hashed.
+    /// Sources located in the local store, with their recorded NAR metadata.
     pub store_sources: usize,
 }
 
@@ -246,8 +266,12 @@ impl Plan {
                         .filter_map(|r| planned.get(r).copied())
                         .collect(),
                 )),
-                Object::Source { .. } => None,
+                Object::Source { .. } | Object::Stored { .. } => None,
             })
+            .chain(self.origins.iter().filter_map(|(p, origin)| {
+                Some((p, origin.text_refs()?.iter()
+                    .filter_map(|r| planned.get(r).copied()).collect()))
+            }))
             .collect();
         let roots = roots
             .iter()
@@ -262,48 +286,19 @@ impl Plan {
         )
     }
 
-    /// Locates and hashes `missing`, a subset of `sources` in plan order: eval-time origins
-    /// first, the rest through `locate` in one batch, hashed on a thread pool.
-    pub fn resolve(&self, missing: &[StorePath], locate: &Locator<'_>) -> Result<Resolved> {
-        let mut infos: Vec<Option<SourceOrigin>> = Vec::with_capacity(missing.len());
-        let mut unknown: Vec<StorePath> = Vec::new();
-        for p in missing {
-            let info = self.origins.get(p).cloned();
-            if info.is_none() {
-                unknown.push(p.clone());
-            }
-            infos.push(info);
-        }
-        let mut substitute = Vec::new();
-        if !unknown.is_empty() {
-            let found = locate(&unknown)?;
-            if found.len() != unknown.len() {
-                return Err(Error::Plan(
-                    "locator returned the wrong number of sources".into(),
-                ));
-            }
-            let mut found = found.into_iter();
-            for (p, slot) in missing.iter().zip(infos.iter_mut()) {
-                if slot.is_some() {
-                    continue;
-                }
-                match found.next().expect("one answer per unknown source") {
-                    Some(info) => *slot = Some(info),
-                    None => substitute.push(p.clone()),
-                }
-            }
-        }
-        let (paths, infos): (Vec<&StorePath>, Vec<SourceOrigin>) = missing
-            .iter()
-            .zip(infos)
-            .filter_map(|(p, i)| i.map(|i| (p, i)))
-            .unzip();
-        let store_sources = unknown.len() - substitute.len();
-        Ok(Resolved {
-            objects: hash_sources(&paths, &infos)?,
-            substitute,
-            store_sources,
-        })
+    /// Resolves missing sources and their stored reference closure, querying the
+    /// destination before attempting to locate any newly discovered reference.
+    pub fn resolve(
+        &self,
+        missing: &[StorePath],
+        locate: &Locator<'_>,
+        valid: &HashSet<String>,
+        query: &mut dyn FnMut(&[StorePath]) -> Result<HashSet<String>>,
+    ) -> Result<Resolved> {
+        resolve_sources(
+            missing, &|p| self.origins.get(p).cloned(), locate,
+            &|p| valid.contains(p.base_name()), query,
+        )
     }
 }
 
@@ -333,7 +328,117 @@ fn check_source_path(path: &StorePath, kind: &SourceKind, nar_hash: &Hash) -> Re
 /// Maps input source store paths that eval did not record, in one batch, to where to read
 /// them and how they were addressed; `None` when the local side cannot produce the path and
 /// the daemon must substitute it. `iets build` asks the local store.
-pub type Locator<'a> = dyn Fn(&[StorePath]) -> Result<Vec<Option<SourceOrigin>>> + 'a;
+pub type Locator<'a> = dyn Fn(&[StorePath]) -> Result<Vec<Option<LocatedSource>>> + 'a;
+
+/// Resolves one missing source frontier for either upload shape. Newly found
+/// references are queried before local lookup, so a held member needs neither
+/// metadata nor bytes locally. Every path is visited at most once per batch.
+pub(crate) fn resolve_sources(
+    missing: &[StorePath],
+    origin: &dyn Fn(&StorePath) -> Option<SourceOrigin>,
+    locate: &Locator<'_>,
+    known: &dyn Fn(&StorePath) -> bool,
+    query: &mut dyn FnMut(&[StorePath]) -> Result<HashSet<String>>,
+) -> Result<Resolved> {
+    let mut resolved = Resolved::default();
+    let mut seen = HashSet::new();
+    let mut pending: Vec<StorePath> = missing.iter()
+        .filter(|p| !known(p) && seen.insert((*p).clone())).cloned().collect();
+    let mut native_paths = Vec::new();
+    let mut native_origins = Vec::new();
+    while !pending.is_empty() {
+        let mut infos: Vec<Option<LocatedSource>> = pending.iter()
+            .map(|p| origin(p).map(LocatedSource::Source)).collect();
+        let unknown: Vec<StorePath> = pending.iter().zip(&infos)
+            .filter(|(_, info)| info.is_none()).map(|(p, _)| p.clone()).collect();
+        if !unknown.is_empty() {
+            let found = locate(&unknown)?;
+            if found.len() != unknown.len() {
+                return Err(Error::Plan("locator returned the wrong number of sources".into()));
+            }
+            resolved.store_sources += found.iter().filter(|info| info.is_some()).count();
+            let mut found = found.into_iter();
+            for info in &mut infos {
+                if info.is_none() {
+                    *info = found.next().expect("one answer per unknown source");
+                }
+            }
+        }
+        let mut next = Vec::new();
+        let mut enqueue = |p: StorePath| {
+            if !known(&p) && seen.insert(p.clone()) {
+                next.push(p);
+            }
+        };
+        for (p, info) in pending.into_iter().zip(infos) {
+            match info {
+                None => resolved.substitute.push(p),
+                Some(LocatedSource::Source(origin)) => {
+                    if let Some(references) = origin.text_refs() {
+                        for reference in references {
+                            enqueue(reference.clone());
+                        }
+                    }
+                    native_paths.push(p);
+                    native_origins.push(origin);
+                }
+                Some(LocatedSource::Stored { at, mut info }) => {
+                    if info.path != p {
+                        return Err(Error::Plan(format!("locator returned '{}' for '{p}'", info.path)));
+                    }
+                    for reference in &info.references {
+                        enqueue(StorePath::parse(reference)?);
+                    }
+                    // The source was not built by the destination (copyStorePath).
+                    info.ultimate = false;
+                    resolved.objects.push(Object::Stored { at, info });
+                }
+            }
+        }
+        if !next.is_empty() {
+            let valid = query(&next)?;
+            next.retain(|p| !valid.contains(p.base_name()));
+        }
+        pending = next;
+    }
+    let paths = native_paths.iter().collect::<Vec<_>>();
+    resolved.objects.extend(hash_sources(&paths, &native_origins)?);
+    Ok(resolved)
+}
+
+/// Registration order across native texts, derivations and stored objects.
+/// Like `copy::topo_sort`, self references do not add a second registration.
+/// The first object for a path wins, retaining stored metadata if a source
+/// closure also names a derivation already represented in the native plan.
+pub(crate) fn order_objects<'a>(objects: &[&'a Object]) -> Vec<&'a Object> {
+    let mut by_name = HashMap::with_capacity(objects.len());
+    for object in objects {
+        by_name.entry(object.store_path().base_name()).or_insert(*object);
+    }
+    let mut seen = HashSet::with_capacity(by_name.len());
+    let mut out = Vec::with_capacity(by_name.len());
+    for object in objects {
+        let mut stack = vec![(*object, false)];
+        while let Some((object, expanded)) = stack.pop() {
+            if expanded {
+                out.push(object);
+                continue;
+            }
+            let name = object.store_path().base_name();
+            if !seen.insert(name) {
+                continue;
+            }
+            let object = by_name[name];
+            stack.push((object, true));
+            for reference in object.reference_names() {
+                if let Some(dependency) = by_name.get(reference) {
+                    stack.push((*dependency, false));
+                }
+            }
+        }
+    }
+    out
+}
 
 /// What the evaluation knows: the drv table and the origin of every added source. Both may
 /// be empty, in which case everything is read from `/nix/store`.
@@ -612,5 +717,75 @@ mod tests {
         let (h, size) = hash_source(&o.at).unwrap();
         assert_eq!(h, crate::store::nar::nar_hash_of_string(b"hello\n"));
         assert!(size > 0);
+    }
+
+    #[test]
+    fn stored_closure_prunes_held_references_and_precedes_eval_text() {
+        use std::cell::RefCell;
+
+        let (a, b, held, text) = (sp("a"), sp("b"), sp("held"), sp("text"));
+        let deriver = sp("producer.drv");
+        let origin = SourceOrigin::text(b"pinned output".to_vec(), BTreeSet::from([a.clone()]));
+        let located = RefCell::new(Vec::new());
+        let queried = RefCell::new(Vec::new());
+        let locate = |paths: &[StorePath]| {
+            located.borrow_mut().extend(paths.iter().cloned());
+            paths.iter().map(|p| {
+                assert!(p == &a || p == &b, "held members and derivers need no local metadata");
+                let references = if p == &a {
+                    vec![a.to_string(), b.to_string(), held.to_string()]
+                } else {
+                    vec![]
+                };
+                Ok(Some(LocatedSource::Stored {
+                    // A stored source is never dumped to recover its known hash.
+                    at: SrcPath::fs("/does-not-exist", None),
+                    info: PathInfo {
+                        path: p.clone(), deriver: deriver.to_string(),
+                        nar_hash: "0".repeat(64), references, registration_time: 7,
+                        nar_size: 128, ultimate: true,
+                        sigs: vec!["cache:dGVzdA==".into()], ca: String::new(),
+                    },
+                }))
+            }).collect::<Result<Vec<_>>>()
+        };
+        let resolved = resolve_sources(
+            std::slice::from_ref(&text),
+            &|p| (p == &text).then(|| origin.clone()),
+            &locate,
+            &|_| false,
+            &mut |paths| {
+                queried.borrow_mut().extend(paths.iter().cloned());
+                Ok(paths.iter().filter(|p| *p == &held)
+                    .map(|p| p.base_name().to_string()).collect())
+            },
+        ).unwrap();
+        assert_eq!(*located.borrow(), [a.clone(), b.clone()]);
+        assert_eq!(*queried.borrow(), [a.clone(), b.clone(), held.clone()]);
+        assert!(resolved.substitute.is_empty());
+        let refs: Vec<_> = resolved.objects.iter().collect();
+        let ordered = order_objects(&refs);
+        assert_eq!(ordered.iter().map(|o| o.store_path()).collect::<Vec<_>>(), [&b, &a, &text]);
+        let Object::Stored { info, .. } = ordered[1] else { panic!("stored identity") };
+        assert_eq!(info.deriver, deriver.to_string());
+        assert_eq!(info.references, [a.to_string(), b.to_string(), held.to_string()]);
+        assert_eq!(info.sigs, ["cache:dGVzdA=="]);
+        assert!(info.ca.is_empty());
+        assert!(!info.ultimate);
+    }
+
+    #[test]
+    fn missing_query_follows_eval_text_references() {
+        let (leaf, text) = (sp("leaf"), sp("text"));
+        let root = node("root.drv", &[&text]);
+        let plan = Plan {
+            sources: vec![leaf.clone(), text.clone()],
+            origins: HashMap::from([(text, SourceOrigin::text(
+                b"leaf".to_vec(), BTreeSet::from([leaf]),
+            ))]),
+            drvs: vec![root], store_drvs: 0,
+        };
+        let (_, missing) = calls(&plan, &[], None);
+        assert_eq!(missing, ["leaf", "root.drv", "text"]);
     }
 }

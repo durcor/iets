@@ -34,7 +34,8 @@ use super::super::event::{Event, Log, Phase};
 use super::super::plan::{Object, Plan};
 use super::super::worker::Connection;
 use super::super::worker::wire::{write_object, write_u64};
-use super::drvwire::{BUILD_PROTOCOL, BuildResult, PathInfo, write_basic_derivation};
+use super::drvwire::{BUILD_PROTOCOL, BuildResult, write_basic_derivation};
+use super::super::path_info::PathInfo;
 use super::sched::{Answer, Sched};
 use super::{Client, Headers, c_request, first_line, gone_away, proto};
 
@@ -208,9 +209,9 @@ impl Write for ChunkShip {
 /// count, then each `ValidPathInfo` at 1.16 followed by its NAR), from the same
 /// `write_object` the worker transport uses. Like the C++ sink, the stream is
 /// flushed once, at the end; the reader decodes a partial frame fine.
-/// `check_sigs` is false because every path sent is content-addressed, so the
-/// daemon recomputes its address. For a `write` token the server forces
-/// `CheckSigs` on anyway (daemon/main.cc), which those paths still pass.
+/// `check_sigs = false` requests the existing signature waiver for copied
+/// outputs. Only an already-trusted caller receives it: the server forces
+/// `CheckSigs` for a `write` token (daemon/main.cc).
 pub fn add_multiple(c: &mut Client, objects: &[&Object], t: &mut Timings) -> Result<u64> {
     let deadline = Instant::now() + Duration::from_secs(c.cfg.connect_timeout);
     let mut pause = Duration::from_millis(500);
@@ -582,10 +583,8 @@ impl Objects {
                 continue;
             }
             stack.push((name, true));
-            if let Object::Drv { references, .. } = o {
-                for r in references {
-                    stack.push((r.base_name().to_string(), false));
-                }
+            for reference in o.reference_names() {
+                stack.push((reference.to_string(), false));
             }
         }
         out
@@ -895,6 +894,31 @@ mod tests {
             sigs: vec![],
             ca: String::new(),
         }
+    }
+
+    #[test]
+    fn retry_closure_follows_stored_and_eval_text_references() {
+        use crate::store::source::{SourceOrigin, SrcPath};
+
+        let a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a";
+        let b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-b";
+        let text = StorePath::from_base_name("cccccccccccccccccccccccccccccccc-text").unwrap();
+        let root = StorePath::from_base_name("dddddddddddddddddddddddddddddddd-root.drv").unwrap();
+        let stored = Object::Stored { at: SrcPath::fs("/unused", None), info: info(a, &[a, b]) };
+        let leaf = Object::Stored { at: SrcPath::fs("/unused", None), info: info(b, &[]) };
+        let text_object = Object::source(text.clone(), SourceOrigin::text(
+            b"pinned output".to_vec(), BTreeSet::from([stored.store_path().clone()]),
+        )).unwrap();
+        let drv = Object::drv(root.clone(), Arc::new(Vec::new()), BTreeSet::from([text.clone()]));
+        let unrelated = Object::Stored {
+            at: SrcPath::fs("/unused", None),
+            info: info("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-unrelated", &[]),
+        };
+        let mut objects = Objects::default();
+        objects.extend(&[&drv, &stored, &unrelated, &text_object, &leaf]);
+        let closure = objects.closure(&root);
+        let names: Vec<_> = closure.iter().map(|o| o.store_path().base_name()).collect();
+        assert_eq!(names, [b, a, text.base_name(), root.base_name()]);
     }
 
     #[test]

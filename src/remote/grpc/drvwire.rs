@@ -1,19 +1,15 @@
 //! The worker-protocol serialisations the gRPC messages carry as opaque bytes:
 //! `BasicDerivation` in a `BuildDerivationRequest`, `BuildResult` and
-//! `vector<KeyedBuildResult>` in the replies, and `UnkeyedValidPathInfo` at
-//! protocol 1.16 in a `PathInfo`.
+//! `vector<KeyedBuildResult>` in the replies.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 use crate::error::{Error, Result};
 use crate::store::drv::{Derivation, DerivationOutput, STRUCTURED_ATTRS_ENV};
 use crate::store::path::StorePath;
 
-use super::super::worker::wire::{
-    self, read_bool, read_opt_path, read_paths, read_str, read_strs, read_time, read_u64,
-    write_str, write_strs, write_u64,
-};
+use super::super::worker::wire::{read_str, read_u64, write_str, write_strs, write_u64};
 
 /// nix-compat.hh:`kBuildProtocolWire` — `major << 8 | minor`. The daemon
 /// rejects anything else with `INVALID_ARGUMENT`.
@@ -146,77 +142,6 @@ fn read_opt_u64(r: &mut dyn io::Read) -> io::Result<Option<u64>> {
         Ok(Some(read_u64(r)?))
     } else {
         Ok(None)
-    }
-}
-
-/// One path's `UnkeyedValidPathInfo` at protocol 1.16, as it arrives in a
-/// `PathInfo` message (path-info-wire.hh:`encodePathInfo`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PathInfo {
-    pub path: StorePath,
-    pub deriver: String,
-    /// Base16, as the wire carries it.
-    pub nar_hash: String,
-    pub references: Vec<String>,
-    pub registration_time: u64,
-    pub nar_size: u64,
-    pub ultimate: bool,
-    pub sigs: Vec<String>,
-    pub ca: String,
-}
-
-impl PathInfo {
-    /// `entry.path` is a store path base name; `entry.info` the 1.16 bytes.
-    pub fn decode(path: &str, info: &[u8]) -> Result<PathInfo> {
-        let mut r = info;
-        PathInfo::fields(StorePath::from_base_name(path)?, &mut r)
-    }
-
-    /// The same fields straight off a worker-protocol connection, where `path`
-    /// is the full store path the caller asked `QueryPathInfo` about.
-    pub fn read(path: &str, r: &mut dyn Read) -> Result<PathInfo> {
-        PathInfo::fields(StorePath::parse(path)?, r)
-    }
-
-    fn fields(path: StorePath, r: &mut dyn Read) -> Result<PathInfo> {
-        let deriver = read_opt_path(r)?;
-        let nar_hash = wire::nar_hash(&read_str(r)?)?;
-        let references = read_paths(r)?;
-        let registration_time = read_time(r)?;
-        let nar_size = read_u64(r)?;
-        let ultimate = read_bool(r)?;
-        let sigs = read_strs(r)?
-            .iter()
-            .map(|s| wire::signature(s))
-            .collect::<io::Result<_>>()?;
-        let ca = wire::content_address(&read_str(r)?)?;
-        Ok(PathInfo {
-            path,
-            deriver,
-            nar_hash,
-            references,
-            registration_time,
-            nar_size,
-            ultimate,
-            sigs,
-            ca,
-        })
-    }
-
-    /// The `ValidPathInfo` an `AddMultipleToStore` body wants for this path
-    /// (worker-protocol.cc:`Serialise<ValidPathInfo>` at 1.16): the path, then
-    /// the same fields back, signatures included, so a local daemon can verify
-    /// what the farm signed.
-    pub fn write(&self, w: &mut dyn Write) -> io::Result<()> {
-        write_str(w, self.path.to_string().as_bytes())?;
-        write_str(w, self.deriver.as_bytes())?;
-        write_str(w, self.nar_hash.as_bytes())?;
-        write_strs(w, &self.references)?;
-        write_u64(w, self.registration_time)?;
-        write_u64(w, self.nar_size)?;
-        write_u64(w, u64::from(self.ultimate))?;
-        write_strs(w, &self.sigs)?;
-        write_str(w, self.ca.as_bytes())
     }
 }
 
@@ -359,25 +284,4 @@ mod tests {
         assert_eq!(res.error_msg, "builder failed");
     }
 
-    #[test]
-    fn path_info_round_trips() {
-        let info = PathInfo {
-            path: StorePath::from_base_name("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo").unwrap(),
-            deriver: "/nix/store/ffffffffffffffffffffffffffffffff-foo.drv".into(),
-            nar_hash: "0".repeat(64),
-            references: vec!["/nix/store/cccccccccccccccccccccccccccccccc-src".into()],
-            registration_time: 7,
-            nar_size: 4096,
-            ultimate: false,
-            sigs: vec!["cache.numtide.com-1:abc=".into()],
-            ca: String::new(),
-        };
-        // `write` prefixes the path, `decode` takes it out of band, so drop it.
-        let mut bytes = Vec::new();
-        info.write(&mut bytes).unwrap();
-        let mut r = bytes.as_slice();
-        assert_eq!(read_str(&mut r).unwrap(), info.path.to_string());
-        let decoded = PathInfo::decode(info.path.base_name(), r).unwrap();
-        assert_eq!(decoded, info);
-    }
 }

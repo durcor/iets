@@ -10,7 +10,7 @@ use crate::log::{ACT_COPY_PATH, ACT_COPY_PATHS, Activity, LVL_INFO, RES_PROGRESS
 use crate::store::path::StorePath;
 
 use super::event::Event;
-use super::grpc::drvwire::PathInfo;
+use super::path_info::PathInfo;
 use super::worker::Connection;
 use super::worker::wire::write_u64;
 

@@ -10,9 +10,18 @@ use std::thread;
 
 use crate::error::{self, Error as CrateError};
 use crate::nixbin;
+use crate::remote::path_info::PathInfo;
 use crate::session::Session;
 use crate::store::path::{StorePath, store_dir};
 use crate::store::source::{SourceKind, SourceOrigin, SrcPath};
+
+/// A native source origin, or a registered store path whose identity and metadata
+/// must survive copying even when it is not content-addressed.
+#[derive(Clone, Debug)]
+pub enum LocatedSource {
+    Source(SourceOrigin),
+    Stored { at: SrcPath, info: PathInfo },
+}
 
 #[derive(Default)]
 struct Slot {
@@ -90,15 +99,13 @@ fn query_references(full: &str) -> Option<BTreeSet<StorePath>> {
         .collect()
 }
 
-/// Answers the plan's locator from the local Nix store: one `nix path-info --json` call
-/// tells how each input source was content-addressed and what it references. Paths named
-/// by `--source` are read from the given local tree instead and are plain sources. A path
-/// that is not valid locally, or whose content address v1 cannot send (an input-addressed
-/// output pinned with `builtins.storePath`), is `None`: the daemon substitutes it.
+/// Answers the plan's locator from the local Nix store in one metadata query.
+/// `--source` overrides remain ordinary native sources. Every locally valid store
+/// path retains its full metadata; only genuinely unavailable paths are `None`.
 pub fn locate_in_store(
     paths: &[StorePath],
     overrides: &HashMap<String, PathBuf>,
-) -> error::Result<Vec<Option<SourceOrigin>>> {
+) -> error::Result<Vec<Option<LocatedSource>>> {
     let ask: Vec<String> = paths
         .iter()
         .map(|p| p.to_string())
@@ -117,51 +124,39 @@ pub fn locate_in_store(
             .stderr(Stdio::inherit())
             .output()
             .map_err(|e| CrateError::io("nix path-info", e))?;
-        if !out.status.success() {
-            return Err(CrateError::Protocol("nix path-info failed".into()));
-        }
         info = serde_json::from_slice(&out.stdout)
             .map_err(|e| CrateError::Protocol(format!("nix path-info: {e}")))?;
+        // Some Nix versions return nonzero for InvalidPath while still reporting
+        // a complete JSON answer with null entries. Only that structured absence
+        // is substitution, not a failed command or malformed metadata.
+        let unavailable = ask.iter().all(|p| info.contains_key(p))
+            && ask.iter().any(|p| info.get(p).is_some_and(|v| v.is_null()));
+        if !out.status.success() && !unavailable {
+            return Err(CrateError::Protocol("nix path-info failed".into()));
+        }
     }
     paths
         .iter()
         .map(|p| {
             let full = p.to_string();
-            let unhashed = |at, kind| SourceOrigin {
-                at,
-                kind,
-                nar: None,
-            };
             if let Some(local) = overrides.get(&full) {
-                return Ok(Some(unhashed(
-                    SrcPath::fs(local.clone(), None),
-                    SourceKind::Source,
-                )));
+                return Ok(Some(LocatedSource::Source(SourceOrigin {
+                    at: SrcPath::fs(local.clone(), None),
+                    kind: SourceKind::Source,
+                    nar: None,
+                })));
             }
             // `null` is what `nix path-info` prints for a path that is not valid.
-            let v = match info.get(&full) {
-                Some(v) if !v.is_null() => v,
-                _ => return Ok(None),
-            };
-            let ca = v["ca"].as_str().unwrap_or("");
-            let kind = if ca.starts_with("fixed:r:sha256:") {
-                SourceKind::Source
-            } else if ca.starts_with("text:sha256:") {
-                let references = v["references"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|r| r.as_str()).collect::<Vec<_>>())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|r| StorePath::parse(r).map_err(CrateError::from))
-                    .collect::<error::Result<_>>()?;
-                SourceKind::Text { references }
-            } else {
+            let v = info.get(&full).ok_or_else(|| {
+                CrateError::Protocol(format!("nix path-info omitted '{p}'"))
+            })?;
+            if v.is_null() {
                 return Ok(None);
-            };
-            Ok(Some(unhashed(
-                SrcPath::fs(format!("{}/{}", store_dir(), p.base_name()), None),
-                kind,
-            )))
+            }
+            Ok(Some(LocatedSource::Stored {
+                at: SrcPath::fs(format!("{}/{}", store_dir(), p.base_name()), None),
+                info: PathInfo::from_json(p.clone(), v)?,
+            }))
         })
         .collect()
 }

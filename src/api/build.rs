@@ -19,7 +19,7 @@ use crate::provenance::Provenance;
 use crate::remote::plan::{self, Inputs};
 use crate::remote::worker::Missing;
 use crate::settings;
-use crate::store::locate::locate_in_store;
+use crate::store::locate::{LocatedSource, locate_in_store};
 use crate::store::path::StorePath;
 use crate::store::source::SourceOrigin;
 use crate::syntax::symbol::FxHashMap;
@@ -123,7 +123,7 @@ pub fn drvs_in_dir(dir: &Path) -> Result<FxHashMap<StorePath, DrvInfo>> {
 /// The plan's locator with no `--source` overrides: for a command that drives
 /// the upload on a connection of its own because it goes on to speak the
 /// worker protocol itself (`nix-shell`, `print-dev-env`).
-pub fn locate_store(paths: &[StorePath]) -> Result<Vec<Option<SourceOrigin>>> {
+pub fn locate_store(paths: &[StorePath]) -> Result<Vec<Option<LocatedSource>>> {
     locate_in_store(paths, &HashMap::new())
 }
 

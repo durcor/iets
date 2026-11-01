@@ -4,5 +4,6 @@
 pub mod copy;
 pub mod event;
 pub mod grpc;
+pub mod path_info;
 pub mod plan;
 pub mod worker;

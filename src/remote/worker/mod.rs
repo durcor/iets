@@ -17,7 +17,7 @@ use serde_json::Value;
 use super::super::store::path;
 use super::event::{Event, Failed, Log, Phase, Started, Stopped};
 use super::grpc::GrpcConfig;
-use super::grpc::drvwire::PathInfo;
+use super::path_info::PathInfo;
 use crate::config::{self, Config};
 use crate::error::{self, Error, Result};
 use crate::log::{
