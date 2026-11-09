@@ -664,6 +664,191 @@ const SUBMODULES: &str = r#"{
   };
 }"#;
 
+/// The source policy is Nix 2.35's, even when this suite's Nix oracle is
+/// 2.34. Hash the explicitly selected bytes independently and use that NAR
+/// for an independent derivation oracle; do not skip older Nix versions.
+#[test]
+fn git_submodule_membership_matches_nix235_index_and_self_refetch_contract() {
+    let Some(f) = F::new() else { return };
+    let origin = f.work().join("policy-origin");
+    write(&origin.join("data"), "selected module\n");
+    git(&origin, &["init", "-q"]);
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-qm", "module"]);
+    let git_bin = f.work().join("policy-git-only");
+    mkdir(&git_bin);
+    symlink(e2e::resolved("git"), git_bin.join("git")).unwrap();
+    let no_nix = f.s.no_nix();
+    let env = [
+        ("PATH", git_bin.to_str().unwrap()),
+        ("IETS_NIX_BIN_DIR", no_nix.to_str().unwrap()),
+    ];
+    for setting in [None, Some(false), Some(true)] {
+        let label = match setting {
+            None => "absent",
+            Some(false) => "false",
+            Some(true) => "true",
+        };
+        let base = f.work().join(format!("policy-base-{label}"));
+        let self_setting = setting
+            .map(|v| format!("inputs.self.submodules = {v};"))
+            .unwrap_or_default();
+        write(
+            &base.join("flake.nix"),
+            &r#"{
+          @SETTING@
+          outputs = { self }: { v = builtins.toJSON {
+            source = self.outPath;
+            info = removeAttrs self.sourceInfo [ "outPath" ];
+            parent = builtins.readFile (self + "/parent-data");
+            visible = builtins.pathExists (self + "/stale/data");
+            directory = builtins.pathExists (self + "/stale");
+            names = builtins.attrNames (builtins.readDir self);
+            drv = (derivation { name = "source-policy-consumer";
+              system = "x86_64-linux"; builder = "/bin/sh"; source = self; }).drvPath;
+          }; };
+        }"#
+            .replace("@SETTING@", &self_setting),
+        );
+        write(&base.join("parent-data"), "original parent\n");
+        git(&base, &["init", "-q"]);
+        git(
+            &base,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                origin.to_str().unwrap(),
+                "stale",
+            ],
+        );
+        git(
+            &base,
+            &[
+                "config",
+                "--file",
+                ".gitmodules",
+                "submodule.stale.url",
+                "../policy-origin",
+            ],
+        );
+        git(&base, &["add", "-A"]);
+        git(&base, &["commit", "-qm", "parent"]);
+        for membership in ["indexed", "staged-removal", "committed-removal"] {
+            for dirty in [false, true] {
+                let name = format!("{label}-{membership}-{dirty}");
+                let repo = f.work().join(format!("policy-{name}"));
+                git(
+                    &f.work(),
+                    &[
+                        "-c",
+                        "protocol.file.allow=always",
+                        "clone",
+                        "--recurse-submodules",
+                        "-q",
+                        base.to_str().unwrap(),
+                        repo.to_str().unwrap(),
+                    ],
+                );
+                if membership != "indexed" {
+                    git(&repo, &["update-index", "--force-remove", "stale"]);
+                }
+                if membership == "committed-removal" {
+                    git(&repo, &["commit", "-qm", "remove gitlink"]);
+                }
+                let parent = if dirty {
+                    "edited parent\n"
+                } else {
+                    "original parent\n"
+                };
+                fs::write(repo.join("parent-data"), parent).unwrap();
+                let reference = format!("{}#v", repo.display());
+                // This cold native evaluation precedes every Nix fetch or
+                // materialization of the selected source for this case.
+                let native = f.iets_eval(&env, &["--raw", "--no-cache", &reference]);
+                assert!(native.status.success(), "{name}: {}", stderr(&native));
+
+                // A literal self setting refetches HEAD only for an otherwise
+                // clean parent. Staged-only gitlink removal is not dirtiness;
+                // preserve the committed mount in that selected revision.
+                let refetch = setting.is_some() && !dirty;
+                let has_mount = if refetch {
+                    membership != "committed-removal"
+                } else {
+                    membership == "indexed"
+                };
+                let visible = has_mount && setting == Some(true);
+                let selected = f.work().join(format!("selected-{name}"));
+                mkdir(&selected);
+                for file in ["flake.nix", ".gitmodules", "parent-data"] {
+                    fs::copy(repo.join(file), selected.join(file)).unwrap();
+                }
+                if has_mount {
+                    mkdir(&selected.join("stale"));
+                    if visible {
+                        fs::copy(origin.join("data"), selected.join("stale/data")).unwrap();
+                    }
+                }
+                let hash = f.nar_hash(selected.to_str().unwrap());
+                let source = f.s.nix_store(&[
+                    "--print-fixed-path",
+                    "--recursive",
+                    "sha256",
+                    &hash,
+                    "source",
+                ]);
+                let oracle = f.nix_eval(&reference);
+                assert!(oracle.status.success(), "{name}: {}", stderr(&oracle));
+                let oracle: Value = serde_json::from_str(&stdout(&oracle)).unwrap();
+                // Git metadata is unchanged by the version-specific source
+                // membership policy. The content address comes from the
+                // independent Nix NAR hash above, not the older tree policy.
+                let mut info = oracle["info"].clone();
+                info["narHash"] = hash.into();
+                let added = f.nix(&[
+                    "store",
+                    "add-path",
+                    "--name",
+                    "source",
+                    selected.to_str().unwrap(),
+                ]);
+                assert!(added.status.success(), "{}", stderr(&added));
+                assert_eq!(stdout(&added), source);
+                let expr = format!(
+                    r#"(derivation {{ name = "source-policy-consumer";
+                  system = "x86_64-linux"; builder = "/bin/sh";
+                  source = builtins.storePath "{source}"; }}).drvPath"#
+                );
+                let drv = f.nix(&["eval", "--raw", "--impure", "--expr", &expr]);
+                assert!(drv.status.success(), "{}", stderr(&drv));
+                let names = if has_mount {
+                    json!([".gitmodules", "flake.nix", "parent-data", "stale"])
+                } else {
+                    json!([".gitmodules", "flake.nix", "parent-data"])
+                };
+                let expected = json!({ "source": source, "info": info, "parent": parent,
+                    "visible": visible, "directory": has_mount, "names": names, "drv": stdout(&drv) });
+                assert_eq!(
+                    serde_json::from_str::<Value>(&stdout(&native)).unwrap(),
+                    expected,
+                    "{name}"
+                );
+                for _ in 0..2 {
+                    let warm = f.iets_eval(&env, &["--raw", &reference]);
+                    assert!(warm.status.success(), "{name}: {}", stderr(&warm));
+                    assert_eq!(
+                        serde_json::from_str::<Value>(&stdout(&warm)).unwrap(),
+                        expected,
+                        "{name}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Native submodule trees have the same visibility, content address and
 /// metadata as Nix, including nested worktrees and relative path inputs.
 #[test]
@@ -1322,15 +1507,58 @@ fn submodule_paths_normalize_and_keep_first_configuration_value() {
             let oracle = f.nix_eval(&r);
             assert!(native.status.success(), "{}", stderr(&native));
             assert!(oracle.status.success(), "{}", stderr(&oracle));
-            assert_eq!(native.stdout, oracle.stdout, "path={path}, pinned={pinned}");
+            let mut expected: Value = serde_json::from_str(&stdout(&oracle)).unwrap();
+            if !pinned && !distinct && expected["bDirectory"] == false {
+                // Nix 2.34 omitted an indexed but unconfigured workdir
+                // gitlink. Nix 2.35 retains its empty directory. Assert the
+                // complete new source and derivation using independent Nix
+                // NAR/derivation oracles rather than discarding these fields.
+                let selected = tempfile::Builder::new()
+                    .prefix("normalized-source-")
+                    .tempdir_in(f.work())
+                    .unwrap();
+                for file in [
+                    "flake.nix",
+                    ".gitmodules",
+                    "a/data",
+                    "a/.gitmodules",
+                    "a/nested/data",
+                ] {
+                    let target = selected.path().join(file);
+                    mkdir(target.parent().unwrap());
+                    fs::copy(repo.join(file), target).unwrap();
+                }
+                mkdir(&selected.path().join("b"));
+                let hash = f.nar_hash(selected.path().to_str().unwrap());
+                let added = f.nix(&[
+                    "store",
+                    "add-path",
+                    "--name",
+                    "source",
+                    selected.path().to_str().unwrap(),
+                ]);
+                assert!(added.status.success(), "{}", stderr(&added));
+                let source = stdout(&added);
+                let expr = format!(
+                    r#"(derivation {{ name = "normalized-mapping-source";
+                  system = "x86_64-linux"; builder = "/bin/sh";
+                  source = builtins.storePath "{source}"; }}).drvPath"#
+                );
+                let drv = f.nix(&["eval", "--raw", "--impure", "--expr", &expr]);
+                assert!(drv.status.success(), "{}", stderr(&drv));
+                expected["source"] = source.into();
+                expected["info"]["narHash"] = hash.into();
+                expected["drv"] = stdout(&drv).into();
+                expected["bDirectory"] = true.into();
+                expected["bEntries"] = json!([]);
+            }
             let value: Value = serde_json::from_str(&stdout(&native)).unwrap();
+            assert_eq!(value, expected, "path={path}, pinned={pinned}");
             assert_eq!(value["a"], "selected child");
             assert_eq!(value["nested"], "nested");
             assert_eq!(value["bVisible"], distinct);
-            if pinned || distinct {
-                assert_eq!(value["bDirectory"], true);
-            }
-            if pinned && !distinct {
+            assert_eq!(value["bDirectory"], true);
+            if !distinct {
                 assert_eq!(value["bEntries"], json!([]));
             }
             assert_eq!(value["info"]["submodules"], true);

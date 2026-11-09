@@ -136,6 +136,15 @@ reads immutable bytes from the input store. Pure local fetch URLs below the
 checkout map to this same final source, even when it is not materialized in
 the real store or the flake lives in a repository subdirectory.
 
+Working-tree Git source membership follows Nix 2.35: only configured
+gitlinks still present in the current index mount child worktrees, while
+disabled or unconfigured indexed gitlinks remain empty directories. Stale
+`.gitmodules` entries do not include removed modules. A clean explicit self
+setting still refetches the selected commit, retaining its committed
+gitlinks even after staged-only removal. Ordinary tracked parent edits
+instead keep working-tree membership. This source-specific version-policy
+change does not claim full Nix 2.35 evaluator compatibility.
+
 
 
 In practice:

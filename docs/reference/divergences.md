@@ -566,6 +566,24 @@ iets prints the `rev-count` warning. `--lint rev-count=off` removes it.
 `tests/e2e_flake.rs` compares the value with Nix on a clean tree, a dirty
 tree and a shallow clone.
 
+## Git source membership targets Nix 2.35
+
+Git source selection intentionally follows Nix 2.35.3 rather than 2.34:
+working-tree submodules require both a configured mount and a current-index
+mode-160000 gitlink. Stale declarations no longer add removed worktrees;
+disabled or unconfigured indexed gitlinks remain empty directories.
+Clean explicit self settings still refetch HEAD and retain that revision's
+gitlinks, including after staged-only index removal. Ordinary tracked parent
+edits retain the current working tree instead.
+
+Only source policy changes. The evaluator's advertised version and other
+language contracts are unchanged. Tests run on Nix 2.34 too: independently
+hashed expected source bytes and independent derivation oracles assert the
+new contract instead of skipping the differing source fields. Runtime
+comparison against Nix 2.35 covers normal Git flakes with self settings
+absent, false and true, indexed/staged/committed removal, and clean/dirty
+parent lanes.
+
 ## Pure evaluation of a project with no flake
 
 A native command evaluates purely by default, where `nix-instantiate`,

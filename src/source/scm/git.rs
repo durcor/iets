@@ -234,9 +234,13 @@ fn same_attributes(
     Ok(true)
 }
 
-/// Workdir submodule mountpoints come from .gitmodules, just as Nix's
-/// getWorkdirInfo does. Observe the file, not a derived git-config query.
-fn submodule_paths(trace: &Trace, root: &Path) -> Result<Vec<PathBuf>, String> {
+/// Configured workdir mountpoints must also be gitlinks in the current
+/// index (Nix 2.35). A stale .gitmodules entry grants no source membership.
+fn submodule_paths(
+    trace: &Trace,
+    root: &Path,
+    gitlinks: &HashSet<&[u8]>,
+) -> Result<Vec<PathBuf>, String> {
     if observe(trace, &root.join(".gitmodules")).is_none() {
         return Ok(Vec::new());
     }
@@ -263,6 +267,7 @@ fn submodule_paths(trace: &Trace, root: &Path) -> Result<Vec<PathBuf>, String> {
     }
     parse_submodule_paths(&out)?
         .into_iter()
+        .filter(|path| gitlinks.contains(path.as_os_str().as_bytes()))
         .map(|path| initialized_submodule(trace, root, &root.join(path)))
         .collect()
 }
@@ -497,6 +502,7 @@ impl Scm for Git {
         // getWorkdirInfo reads, still calls it deleted when it is not on disk
         let ls = query(trace, root, Query::GitLsFiles)?;
         let mut files: HashSet<PathBuf> = HashSet::new();
+        let mut gitlinks = HashSet::new();
         let mut dirty = false;
         for entry in ls.split(|&b| b == 0).filter(|e| !e.is_empty()) {
             let Some(tab) = entry.iter().position(|&b| b == b'\t') else {
@@ -505,6 +511,12 @@ impl Scm for Git {
             let mut fields = entry[..tab].split(|&b| b == b' ');
             let tag = fields.next().unwrap_or(b"");
             if fields.next().unwrap_or(b"") == b"160000" {
+                // Disabled or unconfigured gitlinks are empty directories;
+                // only configured indexed mounts may contribute child files.
+                files.insert(root.join(OsStr::from_bytes(&entry[tab + 1..])));
+                if submodules {
+                    gitlinks.insert(&entry[tab + 1..]);
+                }
                 continue;
             }
             let file = root.join(OsStr::from_bytes(&entry[tab + 1..]));
@@ -528,10 +540,9 @@ impl Scm for Git {
             None => 0,
         };
         if submodules {
-            for child in submodule_paths(trace, root)? {
+            for child in submodule_paths(trace, root, &gitlinks)? {
                 let at = self.snapshot(trace, &child, true)?;
                 dirty |= at.dirty;
-                files.insert(child);
                 files.extend(at.files);
             }
         }

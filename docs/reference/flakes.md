@@ -80,7 +80,14 @@ literal Boolean: Nix rejects deferred expressions such as `import ./settings.nix
 even when they return a Boolean, and iets does too. Other `inputs.self`
 source options are not supported.
 
-As in Nix 2.34.9, applying an explicit self source setting refetches the
+Git source selection follows Nix 2.35.3: working-tree mounts must be both
+configured in `.gitmodules` and mode-160000 gitlinks in the current index.
+A stale declaration alone contributes no directory or child contents.
+Indexed gitlinks with disabled or missing configuration retain empty
+directories. This deliberately differs from Nix 2.34's working-tree source
+membership; it is a source-policy update, not full Nix 2.35 language support.
+
+As in Nix 2.35.3, applying an explicit self source setting refetches the
 root. A parent that was clean before including submodules is already
 resolved to its commit: the refetch mounts only gitlinks configured by that
 commit's `.gitmodules`, recursively. An unconfigured gitlink remains an empty
@@ -90,6 +97,10 @@ child worktrees. Its
 source hash and cached evaluation change when those files change; dirty
 children omit the root's clean revision/count metadata. `lastModified`
 remains the parent commit's date.
+Staged-only removal of a gitlink does not itself make the parent dirty, so
+a clean parent's explicit self setting can still select that gitlink from
+HEAD. An ordinary tracked parent-file edit instead keeps current-index
+membership. Committed removals are absent from both lanes.
 
 Submodule paths are normalized within the repository: `./child` and
 `prefix/../child//./` select `child`, including in nested `.gitmodules`.
