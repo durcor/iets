@@ -777,7 +777,14 @@ fn unix_metadata_cannot_authenticate_another_filesystem_namespace_through_any_se
         let added = stdout(&ok(f
             .s
             .nix("nix")
-            .args(["--store", &remote.store(), "store", "add-path", "--name", "source"])
+            .args([
+                "--store",
+                &remote.store(),
+                "store",
+                "add-path",
+                "--name",
+                "source",
+            ])
             .arg(&f.input)));
         assert_eq!(added, f.source.to_str().unwrap());
         let registered = path_info(&f.s, &added, Some(&remote));
@@ -804,11 +811,19 @@ fn unix_metadata_cannot_authenticate_another_filesystem_namespace_through_any_se
                 cmd.args(["--no-cache", "--no-tracing-cache"]);
             }
             match route {
-                "explicit-uri" => { cmd.args(["--option", "store", &remote.url()]); }
-                "NIX_REMOTE" => { cmd.env("NIX_REMOTE", remote.url()); }
-                "NIX_CONFIG" => { cmd.env("NIX_CONFIG", format!("store = {}\n", remote.url())); }
+                "explicit-uri" => {
+                    cmd.args(["--option", "store", &remote.url()]);
+                }
+                "NIX_REMOTE" => {
+                    cmd.env("NIX_REMOTE", remote.url());
+                }
+                "NIX_CONFIG" => {
+                    cmd.env("NIX_CONFIG", format!("store = {}\n", remote.url()));
+                }
                 "nix.conf" => {}
-                "state-default-socket" => { cmd.env_remove("NIX_DAEMON_SOCKET_PATH"); }
+                "state-default-socket" => {
+                    cmd.env_remove("NIX_DAEMON_SOCKET_PATH");
+                }
                 _ => {
                     cmd.env("NIX_DAEMON_SOCKET_PATH", remote.socket());
                     let selection = match route {
@@ -832,8 +847,10 @@ fn unix_metadata_cannot_authenticate_another_filesystem_namespace_through_any_se
                 let builder = f.assert_build(&value, "namespace-source-consumer");
                 let uploaded = path_info(&f.s, &added, Some(&builder));
                 assert_eq!(source_identity(&uploaded), source_identity(&registered));
-                let expected = ok(f.s.nix("nix-store").arg("--dump").arg(remote.real(&added))).stdout;
-                let actual = ok(f.s.nix("nix-store").arg("--dump").arg(builder.real(&added))).stdout;
+                let expected =
+                    ok(f.s.nix("nix-store").arg("--dump").arg(remote.real(&added))).stdout;
+                let actual =
+                    ok(f.s.nix("nix-store").arg("--dump").arg(builder.real(&added))).stdout;
                 assert_eq!(actual, expected, "selected native source NAR");
             }
         }
@@ -852,7 +869,11 @@ fn unix_metadata_cannot_authenticate_another_filesystem_namespace_through_any_se
         write_input(&f.s, &f.input, true);
         fs::remove_dir_all(&f.source).unwrap();
         f.seed();
-        fs::write(f.input.join("tracked"), "changed original after local registration\n").unwrap();
+        fs::write(
+            f.input.join("tracked"),
+            "changed original after local registration\n",
+        )
+        .unwrap();
         for cached in [false, true, true] {
             f.assert_snapshot(&parse(&ok(&mut native(cached))));
             f.assert_metadata_only();

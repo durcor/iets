@@ -169,13 +169,16 @@ available, the whole authorized filesystem directory is hashed natively,
 including untracked files; a virtual member retains its existing accessor
 and filter. A mismatching current tree remains an error.
 
-When no daemon connection is available, a metadata-only `nix path-info`
-query explicitly selects the local filesystem store; ambient `NIX_REMOTE`
-or a lower-precedence `store` setting cannot authenticate different local
-bytes. The effective session selection must allow an unrelocated local
-store. Parameterized or remote stores are not adopted through this fallback:
-their physical namespace cannot be proved to match the local path. Custom
-`NIX_STORE_DIR` and `NIX_STATE_DIR` remain paired with that local query.
+Snapshot registration metadata always comes from a metadata-only
+`nix --store local path-info` query, paired with the inherited `NIX_STORE_DIR`
+and `NIX_STATE_DIR` of the filesystem bytes. Worker-protocol metadata cannot
+prove that namespace: even a Unix daemon can serve a relocated store. Neither
+an explicit Unix URI nor default-socket environment selection (including
+`NIX_DAEMON_SOCKET_PATH`) is used to authenticate local bytes. The effective
+session selection must allow an unrelocated local store; parameterized or
+remote selections decline local metadata adoption rather than trusting their
+registration database. This metadata lookup reuses immutable NAR information
+without reading or hashing the source payload.
 Unavailable registration takes the authorized cold path; query and permission
 errors remain errors. No Nix fetch or evaluation is delegated.
 
