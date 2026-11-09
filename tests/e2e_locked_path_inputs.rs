@@ -889,9 +889,14 @@ fn unavailable_unix_provider_does_not_prevent_authorized_native_cold_ingestion()
     f.save_expected();
     write_input(&f.s, &f.source, true);
     fs::write(f.source.join("tracked"), "wrong unregistered local bytes\n").unwrap();
+    assert!(!valid(&f.s, &f.source, None));
+    let database = f.s.dir().join("var/db/db.sqlite");
+    let permissions = fs::metadata(&database).unwrap().permissions();
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).unwrap();
     for cached in [false, true, true] {
         let mut cmd = f.native();
         cmd.env("NIX_DAEMON_SOCKET_PATH", f.s.dir().join("absent-socket"))
+            .env("IETS_NIX_BIN_DIR", f.s.no_nix())
             .args(["eval", "--json", "--pure-eval"]);
         if !cached {
             cmd.args(["--no-cache", "--no-tracing-cache"]);
@@ -899,6 +904,7 @@ fn unavailable_unix_provider_does_not_prevent_authorized_native_cold_ingestion()
         f.assert_snapshot(&parse(&ok(cmd.arg(f.reference("snapshot")))));
         f.assert_metadata_only();
     }
+    fs::set_permissions(&database, permissions).unwrap();
 }
 
 #[test]
@@ -948,6 +954,24 @@ fn a_read_only_local_database_uses_verified_native_provider_bytes_then_its_own_c
         let builder = f.assert_build(&initial, "verified-provider-consumer");
         let uploaded = path_info(&f.s, &added, Some(&builder));
         assert_eq!(source_identity(&uploaded), source_identity(&registered));
+        write_input(&f.s, &f.input, true);
+        for cached in [false, true, true] {
+            for attr in ["readTracked", "readUntracked", "publicPath", "publicFullFetch"] {
+                f.assert_rejected(attr, cached);
+            }
+            let public = f.value("publicFilteredFetch", cached);
+            assert_eq!(public["tracked"], initial["tracked"]);
+            assert_eq!(public["hidden"], false);
+            let relative = f.value("relative", cached);
+            assert_eq!(relative["data"], "relative one\n");
+            assert_eq!(relative["hidden"], false);
+        }
+        let outside = f.s.dir().join("outside-native-cache");
+        write_input(&f.s, &outside, true);
+        f.configure_input(&outside);
+        for cached in [false, true, true] {
+            f.assert_rejected("snapshot", cached);
+        }
     }
 }
 
@@ -969,6 +993,7 @@ fn native_provider_metadata_does_not_authenticate_changed_provider_bytes() {
     assert_ne!(actual, f.hash);
     assert_eq!(path_info(&f.s, &added, Some(&remote))["narHash"], f.hash);
     write_input(&f.s, &f.source, true);
+    assert!(!valid(&f.s, &f.source, None));
     let database = f.s.dir().join("var/db/db.sqlite");
     let permissions = fs::metadata(&database).unwrap().permissions();
     fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).unwrap();

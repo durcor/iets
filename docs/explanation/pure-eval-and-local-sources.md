@@ -164,23 +164,34 @@ The private flake-input hook then selects the immutable source named by the
 lock's `narHash`, not the current root tree's filtered copy. A registered
 local source must have matching content-address, NAR hash, size, identity
 and references, or an input-store entry must supply verified source
-metadata. No full immutable source rehash is needed. If no snapshot is
-available, the whole authorized filesystem directory is hashed natively,
+metadata. Verified input-store entries and usable local registration reuse
+immutable metadata without a payload rehash. If no snapshot is available,
+the whole authorized filesystem directory is hashed natively,
 including untracked files; a virtual member retains its existing accessor
 and filter. A mismatching current tree remains an error.
 
-Snapshot registration metadata always comes from a metadata-only
-`nix --store local path-info` query, paired with the inherited `NIX_STORE_DIR`
-and `NIX_STATE_DIR` of the filesystem bytes. Worker-protocol metadata cannot
-prove that namespace: even a Unix daemon can serve a relocated store. Neither
-an explicit Unix URI nor default-socket environment selection (including
-`NIX_DAEMON_SOCKET_PATH`) is used to authenticate local bytes. The effective
-session selection must allow an unrelocated local store; parameterized or
-remote selections decline local metadata adoption rather than trusting their
-registration database. This metadata lookup reuses immutable NAR information
-without reading or hashing the source payload.
-Unavailable registration takes the authorized cold path; query and permission
-errors remain errors. No Nix fetch or evaluation is delegated.
+For a filesystem-backed snapshot, a metadata-only
+`nix --store local path-info` query is paired with the inherited `NIX_STORE_DIR`
+and `NIX_STATE_DIR`. This path requires a usable local Nix metadata provider;
+it never delegates source fetching or evaluation. Worker-protocol metadata
+cannot prove that namespace: even a Unix daemon can serve a relocated store.
+Neither explicit Unix URIs nor default-socket environment selection (including
+`NIX_DAEMON_SOCKET_PATH`) authenticate unchecked local bytes. Parameterized or
+remote selections decline local filesystem adoption.
+
+An ordinary multi-user local database may be readable but unavailable to
+Nix's direct provider, which requires write access even for metadata queries.
+In that case the selected Unix provider must supply both the registered
+metadata and the NAR bytes through the native worker protocol. iets streams
+those bytes into a private spool, validates their size and canonical NAR hash,
+and atomically publishes the verified input-store entry before using its
+accessor. It never attaches that metadata to the evaluator's logical filesystem
+path. This one-time verified ingestion does not retain the NAR in memory or
+restore another filesystem tree; later input-store reuse needs no provider,
+transfer or full rehash. Unsafe immutable-SQLite mode is not used against a
+live store. Missing providers or registration take the authorized native cold
+path; malformed metadata, transfer failures, original-source permissions and
+local database traversal/read errors remain errors.
 
 The snapshot stays selected if the original directory changes or vanishes.
 Cached results observe its availability and the original location's
