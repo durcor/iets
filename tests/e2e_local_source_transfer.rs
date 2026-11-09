@@ -762,8 +762,13 @@ fn readonly_unknown_sources_preserve_fixed_and_streamed_identity_and_provider_by
     let fixture = Fixture::new(&s, true);
     let consumer = fixture.consumer(&s, "readonly-source-consumer");
     let provider = s.builder("readonly-provider", &[]);
-    ok(s.nix("nix")
-        .args(["copy", "--no-check-sigs", "--to", &provider.url(), &consumer.drv]));
+    ok(s.nix("nix").args([
+        "copy",
+        "--no-check-sigs",
+        "--to",
+        &provider.url(),
+        &consumer.drv,
+    ]));
     let expected_nars: Vec<_> = fixture
         .sources
         .iter()
@@ -860,8 +865,13 @@ fn unknown_ia_metadata_cannot_authenticate_corrupt_provider_bytes() {
     let fixture = Fixture::new(&s, false);
     let consumer = fixture.consumer(&s, "corrupt-provider-consumer");
     let provider = s.builder("corrupt-provider", &[]);
-    ok(s.nix("nix")
-        .args(["copy", "--no-check-sigs", "--to", &provider.url(), &consumer.drv]));
+    ok(s.nix("nix").args([
+        "copy",
+        "--no-check-sigs",
+        "--to",
+        &provider.url(),
+        &consumer.drv,
+    ]));
     let source = &fixture.sources[0];
     let physical = provider.real(&source.path);
     fs::set_permissions(&physical, fs::Permissions::from_mode(0o644)).unwrap();

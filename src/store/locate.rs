@@ -308,8 +308,8 @@ pub fn locate_in_store(
                             }),
                         );
                     }
-                } else if let Err(e) = opened {
-                    return Err(e);
+                } else {
+                    opened?;
                 }
             }
         }
