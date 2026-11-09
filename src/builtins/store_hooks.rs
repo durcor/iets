@@ -730,14 +730,13 @@ pub fn copy_path_to_store(
     let (sp, origin, hash, nar_size) = match at.at() {
         None => return Err(copy_err(enoent())),
         Some(At::Mem(_)) => return Err(recopy_unsupported(path, pos)),
-        // the input itself needs no hashing: its store path is the one the
-        // lock named and its NAR hash is in the index
+        // A whole input-store tree needs no hashing, but copying a path still
+        // uses its full basename, exactly as the filesystem-backed branch.
         Some(At::Spool(tree, base))
             if at.rel.is_empty() && matches!(at.src, Src::Spool { accepted: None, .. }) =>
         {
             treestore::record(ev, &tree, base);
-            let sp = StorePath::from_base_name(base)
-                .map_err(|e| Error::boxed(ErrorKind::Eval, e.0, pos))?;
+            let sp = fixed(&tree.nar_hash())?;
             (sp, at.clone(), tree.nar_hash(), tree.nar_size())
         }
         Some(At::Spool(tree, base)) => {

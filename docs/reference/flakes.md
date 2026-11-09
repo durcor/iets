@@ -268,6 +268,11 @@ no `/nix/store` entry and no daemon. iets checks `/nix/store` first, and
 uses it when it has the tree. A symlink target outside the tree is not
 resolved, because the entry holds no bytes for it.
 
+A path-valued copy of a whole input-store tree uses the same
+basename-derived destination store path as a filesystem-backed copy. The
+existing NAR hash and size supply that content-equivalent identity without
+rehashing or duplicating the tree; builds upload the same source NAR.
+
 **Uploads.** Nothing is registered during evaluation. A build reads the
 entry only when it sends the NAR, straight to whichever builder the build
 targets (`docs/reference/builders.md`).

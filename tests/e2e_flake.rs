@@ -1730,6 +1730,89 @@ fn rev_count() {
 /// A tarball input: Nix locks it in a store of its own, and iets
 /// downloads, unpacks, hashes and keeps the tree in its input store.
 #[test]
+fn copying_an_input_store_root_uses_nix_source_basename_without_rehashing() {
+    let Some(mut f) = F::new().map(F::local_inputs) else {
+        return;
+    };
+    let source = f.work().join("copy-source");
+    write(
+        &source.join("data"),
+        &format!("input-store copy {}\n", f.work().display()),
+    );
+    let archive = f.w("copy-source.tar.gz");
+    tar(&f.work(), &archive, "copy-source");
+    let flake = f.w("copy-flake");
+    f.s.write(
+        &format!("{flake}/flake.nix"),
+        &format!(
+            r#"{{
+      inputs.tb.url = "file://{archive}";
+      inputs.tb.flake = false;
+      outputs = {{ self, tb }}: let
+        copied = let path = /. + builtins.unsafeDiscardStringContext (toString tb); in "${{path}}";
+      in {{
+        v = copied;
+        consumer = derivation {{
+          name = "copied-spool-consumer";
+          system = "@SYSTEM@";
+          builder = "@SHELL@";
+          input = copied;
+          args = [ "-c" "IFS= read -r line < $input/data; printf '%s\\n' \"$line\" > $out" ];
+        }};
+      }};
+    }}"#
+        ),
+    );
+    let (expected, original) = f.lock_apart(&flake, "tb", "copy-oracle-store");
+    assert!(
+        !expected.is_empty(),
+        "the independent Nix oracle must succeed"
+    );
+    assert_ne!(
+        expected, original,
+        "Nix copies a path using its full basename"
+    );
+    assert!(!Path::new(&original).exists());
+    f.fetch_only(
+        "input-store root copy basename",
+        &format!("{flake}#v"),
+        &expected,
+    );
+    let no_nix = f.no_nix();
+    for flags in [&["--no-cache"][..], &[][..], &[][..]] {
+        let env: Vec<_> = no_nix.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let reference = format!("{flake}#v");
+        let mut args = vec!["--raw"];
+        args.extend(flags);
+        args.push(&reference);
+        let out = f.iets_eval(&env, &args);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(stdout(&out), expected);
+    }
+    let builder = f.s.builder("copied-spool-builder", &[]);
+    let out = ok(f
+        .iets()
+        .envs(no_nix.iter().map(|(k, v)| (*k, v.as_str())))
+        .args(["build", "--no-cache", "--builder", &builder.url()])
+        .arg(format!("{flake}#consumer")));
+    assert_eq!(
+        fs::read(builder.real(&stdout(&out))).unwrap(),
+        fs::read(source.join("data")).unwrap()
+    );
+    let wanted = ok(f.s.nix("nix-store").arg("--dump").arg(&source)).stdout;
+    let received = ok(f
+        .s
+        .nix("nix-store")
+        .arg("--dump")
+        .arg(builder.real(&expected)))
+    .stdout;
+    assert_eq!(
+        received, wanted,
+        "renaming must preserve the exact source NAR"
+    );
+}
+
+#[test]
 fn iets_fetches_a_tarball_input() {
     let Some(mut f) = F::new().map(F::local_inputs) else {
         return;
