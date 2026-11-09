@@ -278,6 +278,7 @@ pub(crate) fn path_snapshot(ev: &mut Evaluator, hash: &Hash, pos: Pos) -> EvalRe
                 "input store snapshot '{full}' has inconsistent NAR metadata"
             )));
         }
+        check_path_snapshot_kind(&sp, entry.stat(b"", false)).map_err(fail)?;
         adopt(ev, &sp, &entry);
         return Ok(true);
     }
@@ -301,11 +302,15 @@ pub(crate) fn path_snapshot(ev: &mut Evaluator, hash: &Hash, pos: Pos) -> EvalRe
         let info = found.into_iter().next().flatten();
         if let Some(info) = info {
             check_path_snapshot(&sp, hash, &info).map_err(fail)?;
-            if !matches!(kind, trace::Kind::Directory | trace::Kind::Regular) {
-                return Err(fail(format!(
-                    "locked path snapshot '{full}' is not a file or directory"
-                )));
-            }
+            check_path_snapshot_kind(
+                &sp,
+                match kind {
+                    trace::Kind::Directory => Some(nar::FileType::Directory),
+                    trace::Kind::Regular => Some(nar::FileType::Regular),
+                    _ => None,
+                },
+            )
+            .map_err(fail)?;
             ev.known.add(
                 sp,
                 SourceOrigin::tree(SrcPath::fs(&full, None), *hash, info.nar_size),
@@ -351,18 +356,29 @@ fn provider_path_snapshot(
             return Err(fail(e.to_string()));
         }
     };
-    if key != *sp
-        || !matches!(
-            entry.stat(b"", false),
-            Some(nar::FileType::Directory | nar::FileType::Regular)
-        )
-    {
+    if key != *sp {
         return Err(fail(format!(
-            "locked path snapshot '{sp}' is not a file or directory"
+            "locked path snapshot '{sp}' has inconsistent cache identity"
         )));
     }
+    check_path_snapshot_kind(sp, entry.stat(b"", false)).map_err(fail)?;
     adopt(ev, sp, &entry);
     Ok(true)
+}
+
+/// Declared snapshots require a raw file or directory root, unlike the general
+/// byte cache, which also retains legitimate stored symlinks.
+fn check_path_snapshot_kind(sp: &StorePath, kind: Option<nar::FileType>) -> Result<(), String> {
+    if matches!(
+        kind,
+        Some(nar::FileType::Directory | nar::FileType::Regular)
+    ) {
+        Ok(())
+    } else {
+        Err(format!(
+            "locked path snapshot '{sp}' is not a file or directory"
+        ))
+    }
 }
 
 /// A path fetch produces a recursive content-addressed source without refs.

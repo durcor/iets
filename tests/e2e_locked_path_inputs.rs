@@ -1000,6 +1000,117 @@ fn a_read_only_local_database_uses_verified_native_provider_bytes_then_its_own_c
 }
 
 #[test]
+fn declared_symlink_roots_are_rejected_after_provider_and_general_upload_cache_population() {
+    for general_upload in [false, true] {
+        let Some(mut f) = Fixture::new(None) else {
+            return;
+        };
+        let remote = f.s.builder("symlink-provider", &[]);
+        let link = f.s.dir().join("stored-link");
+        symlink(&f.input, &link).unwrap();
+        f.hash = hash_path(&f.s, &link);
+        f.source = source_path(&f.s, &f.hash);
+        let added = stdout(&ok(f
+            .s
+            .nix("nix")
+            .args([
+                "--store",
+                &remote.store(),
+                "store",
+                "add-path",
+                "--name",
+                "source",
+            ])
+            .arg(&link)));
+        assert_eq!(added, f.source.to_str().unwrap());
+        let registered = path_info(&f.s, &added, Some(&remote));
+        assert_eq!(registered["narHash"], f.hash);
+        // A real directory at the logical path must not hide the provider's
+        // symlink root, nor may following the link make its target eligible.
+        fs::create_dir(&f.source).unwrap();
+        f.s.write(f.repo.join("flake.nix").to_str().unwrap(),
+            &format!("{{ inputs.dep = {{ url = \"path:{}\"; flake = false; }}; outputs = {{self,dep}}: {{ selected = dep.outPath; }}; }}", f.input.display()));
+        let mut lock: Value =
+            serde_json::from_slice(&fs::read(f.repo.join("flake.lock")).unwrap()).unwrap();
+        lock["nodes"]["dep"]["locked"]["narHash"] = f.hash.clone().into();
+        lock["nodes"]["dep"]["flake"] = false.into();
+        fs::write(f.repo.join("flake.lock"), lock.to_string()).unwrap();
+        git(&f.repo, &["add", "flake.nix", "flake.lock"]);
+        let database = f.s.dir().join("var/db/db.sqlite");
+        let permissions = fs::metadata(&database).unwrap().permissions();
+        fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).unwrap();
+        if general_upload {
+            let consumer = f.s.builder("symlink-consumer", &[("require-sigs", "true")]);
+            let expression = format!(
+                "derivation {{ name = \"symlink-consumer\"; system = \"{}\"; builder = \"{}\"; args = [ \"-c\" \"{} $src > $out\" ]; src = builtins.storePath {}; }}",
+                e2e::system(),
+                e2e::resolved("bash").display(),
+                e2e::resolved("readlink").display(),
+                serde_json::to_string(&added).unwrap()
+            );
+            let output = stdout(&ok(f.native().env("IETS_NIX_BIN_DIR", f.s.no_nix()).args(
+                [
+                    "build",
+                    "--impure",
+                    "--builder",
+                    &consumer.url(),
+                    "--option",
+                    "store",
+                    &remote.url(),
+                    "--expr",
+                    &expression,
+                ],
+            )));
+            assert_eq!(
+                fs::read_to_string(consumer.real(output.trim())).unwrap(),
+                format!("{}\n", f.input.display())
+            );
+            let copied = path_info(&f.s, &added, Some(&consumer));
+            assert_eq!(source_identity(&copied), source_identity(&registered));
+            assert_eq!(copied["signatures"], registered["signatures"]);
+            assert_eq!(fs::read_link(consumer.real(&added)).unwrap(), f.input);
+            assert_eq!(
+                ok(f.s
+                    .nix("nix-store")
+                    .args(["--store", &remote.store(), "--dump", &added]))
+                .stdout,
+                ok(f.s
+                    .nix("nix-store")
+                    .args(["--dump"])
+                    .arg(consumer.real(&added)))
+                .stdout
+            );
+        }
+        for cached in [false, true, false, true] {
+            let mut cmd = f.native();
+            cmd.env("IETS_NIX_BIN_DIR", f.s.no_nix()).args([
+                "eval",
+                "--json",
+                "--pure-eval",
+                "--option",
+                "store",
+                &remote.url(),
+            ]);
+            if !cached {
+                cmd.args(["--no-cache", "--no-tracing-cache"]);
+            }
+            let out = cmd.arg(f.reference("selected")).output().unwrap();
+            assert!(
+                !out.status.success(),
+                "accepted a cached symlink snapshot: {}",
+                stdout(&out)
+            );
+            assert!(
+                stderr(&out).contains("is not a file or directory"),
+                "{}",
+                stderr(&out)
+            );
+        }
+        fs::set_permissions(database, permissions).unwrap();
+    }
+}
+
+#[test]
 fn native_provider_metadata_does_not_authenticate_changed_provider_bytes() {
     let Some(f) = Fixture::new(Some(LOCK_MTIME)) else {
         return;
