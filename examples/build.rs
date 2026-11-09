@@ -78,7 +78,7 @@ fn eval_and_build(ev: &mut Evaluator, a: EvalArgs, url: String) -> u8 {
         sources: &sources,
     };
     let no_overrides = HashMap::new();
-    let locate = |paths: &[StorePath]| locate_in_store(paths, &no_overrides);
+    let locate = |paths: &[StorePath]| locate_in_store(paths, &no_overrides, ev.session());
     let plan = match plan::plan(&root_paths, inputs) {
         Ok(p) => p,
         Err(e) => {

@@ -128,7 +128,7 @@ pub fn drvs_in_dir(dir: &Path) -> Result<FxHashMap<StorePath, DrvInfo>> {
 /// paths return `None`; malformed metadata returns an error. The upload plan
 /// discovers runtime references and clears `ultimate` when copying.
 pub fn locate_store(paths: &[StorePath]) -> Result<Vec<Option<LocatedSource>>> {
-    locate_in_store(paths, &HashMap::new())
+    locate_in_store(paths, &HashMap::new(), &crate::session::Session::current())
 }
 
 /// A planned closure, the connection that carries it, and the builds.
@@ -174,21 +174,27 @@ impl Dispatch {
 
     /// Uploads what `batch` needs and builds it in one op.
     pub fn submit(&mut self, batch: Vec<Target>) -> Result<Vec<Outcome>> {
-        let locate = |paths: &[StorePath]| locate_in_store(paths, &self.overrides);
+        let locate = |paths: &[StorePath]| {
+            locate_in_store(paths, &self.overrides, &crate::session::Session::current())
+        };
         let mut up = PlanUpload::new(&self.plan, &locate);
         self.d.submit(&mut up, batch)
     }
 
     /// `--no-build`: register the closure and stop.
     pub fn upload_only(&mut self, roots: &[StorePath]) -> Result<()> {
-        let locate = |paths: &[StorePath]| locate_in_store(paths, &self.overrides);
+        let locate = |paths: &[StorePath]| {
+            locate_in_store(paths, &self.overrides, &crate::session::Session::current())
+        };
         let mut up = PlanUpload::new(&self.plan, &locate);
         self.d.upload_only(&mut up, roots)
     }
 
     /// `--dry-run`: what building `targets` would build and fetch.
     pub fn missing(&mut self, targets: &[Target]) -> Result<Missing> {
-        let locate = |paths: &[StorePath]| locate_in_store(paths, &self.overrides);
+        let locate = |paths: &[StorePath]| {
+            locate_in_store(paths, &self.overrides, &crate::session::Session::current())
+        };
         let mut up = PlanUpload::new(&self.plan, &locate);
         self.d.missing(&mut up, targets)
     }

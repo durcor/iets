@@ -286,20 +286,13 @@ pub(crate) fn path_snapshot(ev: &mut Evaluator, hash: &Hash, pos: Pos) -> EvalRe
             Some(conn) => conn
                 .query_path_info(&full, &mut |_| {})
                 .map_err(|e| fail(e.to_string()))?,
-            None if matches!(
-                nix_conf(ev.session()).store().split('?').next(),
-                Some("auto" | "daemon" | "local" | "")
-            ) || matches!(
-                Transport::parse(&nix_conf(ev.session()).store()),
-                Some(Transport::Unix(_))
-            ) =>
-            {
-                // A daemonless local store may still provide metadata. Never
-                // use a remote store's metadata to authenticate local bytes.
-                // This existing locator runs path-info, not fetch/evaluation.
+            None => {
+                // The locator binds registration metadata to the local byte
+                // namespace using this session's effective store selection.
                 let found = crate::store::locate::locate_in_store(
                     std::slice::from_ref(&sp),
                     &HashMap::new(),
+                    ev.session(),
                 )
                 .map_err(|e| fail(e.to_string()))?;
                 match found.into_iter().next().flatten() {
@@ -307,7 +300,6 @@ pub(crate) fn path_snapshot(ev: &mut Evaluator, hash: &Hash, pos: Pos) -> EvalRe
                     _ => None,
                 }
             }
-            None => None,
         };
         if let Some(info) = info {
             check_path_snapshot(&sp, hash, &info).map_err(fail)?;

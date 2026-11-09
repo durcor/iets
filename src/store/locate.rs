@@ -99,21 +99,43 @@ fn query_references(full: &str) -> Option<BTreeSet<StorePath>> {
         .collect()
 }
 
-/// Answers the plan's locator from the local Nix store in one metadata query.
-/// `--source` overrides remain ordinary native sources. Every locally valid store
-/// path retains its full metadata; only genuinely unavailable paths are `None`.
+/// Only an unrelocated local namespace can authenticate bytes read directly
+/// below `store_dir()`. A configured root/real/store parameter may point its
+/// registration database at different physical bytes; leave those sources to
+/// the native cold path instead. Never copy arbitrary settings (or secrets)
+/// into a metadata subprocess's arguments.
+fn local_metadata_store(session: &Session) -> bool {
+    let cfg = session.nix_conf.get_or_init(|| {
+        crate::config::Config::read(&[]).unwrap_or_else(|_| crate::config::Config::empty())
+    });
+    let store = cfg.store();
+    matches!(store.as_str(), "auto" | "daemon" | "local" | "")
+        || (!store.contains('?') && store.starts_with("unix://"))
+}
+
+/// Answers the plan's locator from the same local filesystem store as its bytes.
+/// The session's effective selection must permit an unrelocated local store.
+/// `--source` overrides remain ordinary native sources. Only genuinely
+/// unavailable paths (including unsupported store namespaces) are `None`.
 pub fn locate_in_store(
     paths: &[StorePath],
     overrides: &HashMap<String, PathBuf>,
+    session: &Session,
 ) -> error::Result<Vec<Option<LocatedSource>>> {
+    let local_store = local_metadata_store(session);
     let ask: Vec<String> = paths
         .iter()
         .map(|p| p.to_string())
-        .filter(|p| !overrides.contains_key(p))
+        .filter(|p| local_store && !overrides.contains_key(p))
         .collect();
     let mut info: HashMap<String, serde_json::Value> = HashMap::new();
     if !ask.is_empty() {
         let out = Command::new(nixbin::nix())
+            // Explicit CLI selection outranks both nix.conf and NIX_REMOTE.
+            // `local` uses the inherited NIX_STORE_DIR/NIX_STATE_DIR namespace,
+            // exactly where the filesystem origin below is read. In particular,
+            // do not forward a relocated store's URL to authenticate these bytes.
+            .args(["--store", "local"])
             .args([
                 "--extra-experimental-features",
                 "nix-command",
@@ -145,6 +167,9 @@ pub fn locate_in_store(
                     kind: SourceKind::Source,
                     nar: None,
                 })));
+            }
+            if !local_store {
+                return Ok(None);
             }
             // `null` is what `nix path-info` prints for a path that is not valid.
             let v = info

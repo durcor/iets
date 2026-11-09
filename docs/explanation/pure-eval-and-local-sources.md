@@ -169,6 +169,16 @@ available, the whole authorized filesystem directory is hashed natively,
 including untracked files; a virtual member retains its existing accessor
 and filter. A mismatching current tree remains an error.
 
+When no daemon connection is available, a metadata-only `nix path-info`
+query explicitly selects the local filesystem store; ambient `NIX_REMOTE`
+or a lower-precedence `store` setting cannot authenticate different local
+bytes. The effective session selection must allow an unrelocated local
+store. Parameterized or remote stores are not adopted through this fallback:
+their physical namespace cannot be proved to match the local path. Custom
+`NIX_STORE_DIR` and `NIX_STATE_DIR` remain paired with that local query.
+Unavailable registration takes the authorized cold path; query and permission
+errors remain errors. No Nix fetch or evaluation is delegated.
+
 The snapshot stays selected if the original directory changes or vanishes.
 Cached results observe its availability and the original location's
 authorization; a missing original disables trace-result reuse so a dangling

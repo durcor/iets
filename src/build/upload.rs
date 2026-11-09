@@ -230,7 +230,9 @@ impl Uploader for StreamUpload {
             .filter(|p| !valid.contains(p.base_name()))
             .cloned()
             .collect();
-        let locate = |paths: &[StorePath]| locate::locate_in_store(paths, &HashMap::new());
+        let locate = |paths: &[StorePath]| {
+            locate::locate_in_store(paths, &HashMap::new(), &crate::session::Session::current())
+        };
         let resolved = plan::resolve_sources(
             &missing_sources,
             &|p| self.sources.origin(p),

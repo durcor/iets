@@ -6,6 +6,7 @@ mod e2e;
 mod hermetic;
 
 use std::fs::{self, File, FileTimes};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -558,6 +559,169 @@ fn an_unregistered_mutable_hash_named_directory_is_not_a_pinned_cache_entry() {
     // asking Nix to populate the genuine immutable source as an oracle.
     fs::remove_dir_all(&f.source).unwrap();
     assert_eq!(native, f.oracle("snapshot"));
+}
+
+/// The logical store namespace is shared, but the second store's bytes and
+/// registration database live below its own root. No provider is mocked.
+#[test]
+fn daemonless_snapshot_metadata_cannot_follow_ambient_store_selection() {
+    for setting in ["NIX_REMOTE", "nix.conf", "NIX_CONFIG"] {
+        let Some(f) = Fixture::new(Some(LOCK_MTIME)) else {
+            return;
+        };
+        f.save_expected();
+        let remote = f.s.builder("metadata-authority", &[]);
+        let added = stdout(&ok(f
+            .s
+            .nix("nix")
+            .args([
+                "--store",
+                &remote.store(),
+                "store",
+                "add-path",
+                "--name",
+                "source",
+            ])
+            .arg(&f.input)));
+        assert_eq!(added, f.source.to_str().unwrap());
+        assert_eq!(hash_path(&f.s, &remote.real(&added)), f.hash);
+        assert_eq!(path_info(&f.s, &added, Some(&remote))["narHash"], f.hash);
+        write_input(&f.s, &f.source, true);
+        fs::write(f.source.join("tracked"), "wrong unregistered local bytes\n").unwrap();
+        assert_ne!(hash_path(&f.s, &f.source), f.hash);
+        assert!(!valid(&f.s, &f.source, None));
+
+        let native = || {
+            let mut cmd = f.native();
+            cmd.env("IETS_NIX_BIN_DIR", e2e::resolved("nix").parent().unwrap());
+            match setting {
+                "NIX_REMOTE" => {
+                    cmd.env("NIX_REMOTE", remote.url());
+                }
+                "NIX_CONFIG" => {
+                    cmd.env("NIX_CONFIG", format!("store = {}\n", remote.url()));
+                }
+                _ => {
+                    let conf = f.s.dir().join("conf/nix.conf");
+                    let text = fs::read_to_string(&conf).unwrap();
+                    if !text.contains("store = ") {
+                        fs::write(conf, format!("{text}store = {}\n", remote.url())).unwrap();
+                    }
+                }
+            }
+            cmd.args([
+                "eval",
+                "--json",
+                "--pure-eval",
+                "--option",
+                "store",
+                "local",
+            ]);
+            cmd
+        };
+        for cached in [false, true, true] {
+            let mut cmd = native();
+            if !cached {
+                cmd.arg("--no-cache");
+            }
+            let value = parse(&ok(cmd.arg(f.reference("snapshot"))));
+            f.assert_snapshot(&value);
+        }
+        // Absence in the selected local database must still take the cold
+        // authorized path, including a real mismatch rather than remote reuse.
+        fs::write(f.input.join("untracked"), "authorized source changed\n").unwrap();
+        let actual = hash_path(&f.s, &f.input);
+        assert_ne!(actual, f.hash);
+        let out = native()
+            .arg("--no-cache")
+            .arg(f.reference("snapshot"))
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{}", stdout(&out));
+        assert!(stderr(&out).contains(&f.hash), "{}", stderr(&out));
+        assert!(stderr(&out).contains(&actual), "{}", stderr(&out));
+    }
+}
+
+#[test]
+fn daemonless_local_metadata_keeps_registered_bytes_and_reports_permission_errors() {
+    let Some(f) = Fixture::new(Some(LOCK_MTIME)) else {
+        return;
+    };
+    f.save_expected();
+    f.seed();
+    let expected = f.oracle("snapshot");
+    fs::write(f.input.join("tracked"), "changed authorized checkout\n").unwrap();
+    let native = || {
+        let mut cmd = f.native();
+        cmd.env("IETS_NIX_BIN_DIR", e2e::resolved("nix").parent().unwrap())
+            .args([
+                "eval",
+                "--json",
+                "--pure-eval",
+                "--no-cache",
+                "--option",
+                "store",
+                "local",
+            ])
+            .arg(f.reference("snapshot"));
+        cmd
+    };
+    assert_eq!(parse(&ok(&mut native())), expected);
+    for path in [f.s.dir().join("var/db"), f.s.store_dir()] {
+        let permissions = fs::metadata(&path).unwrap().permissions();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o0)).unwrap();
+        let out = native().output().unwrap();
+        fs::set_permissions(&path, permissions).unwrap();
+        assert!(
+            !out.status.success(),
+            "permission failure returned {}",
+            stdout(&out)
+        );
+        assert!(out.stdout.is_empty());
+        assert_eq!(parse(&ok(&mut native())), expected);
+    }
+}
+
+#[test]
+fn relocated_metadata_never_authenticates_the_logical_store_directory() {
+    let Some(f) = Fixture::new(Some(LOCK_MTIME)) else {
+        return;
+    };
+    f.save_expected();
+    let remote = f.s.builder("relocated-metadata", &[]);
+    let added = stdout(&ok(f
+        .s
+        .nix("nix")
+        .args([
+            "--store",
+            &remote.store(),
+            "store",
+            "add-path",
+            "--name",
+            "source",
+        ])
+        .arg(&f.input)));
+    assert_eq!(added, f.source.to_str().unwrap());
+    assert_eq!(hash_path(&f.s, &remote.real(&added)), f.hash);
+    write_input(&f.s, &f.source, true);
+    fs::write(f.source.join("tracked"), "wrong logical namespace bytes\n").unwrap();
+    assert_ne!(hash_path(&f.s, &f.source), f.hash);
+    let out = ok(f
+        .native()
+        .env("IETS_NIX_BIN_DIR", e2e::resolved("nix").parent().unwrap())
+        .env("NIX_REMOTE", remote.store())
+        .args([
+            "eval",
+            "--json",
+            "--pure-eval",
+            "--no-cache",
+            "--option",
+            "store",
+            &remote.store(),
+        ])
+        .arg(f.reference("snapshot")));
+    f.assert_snapshot(&parse(&out));
 }
 
 #[test]
