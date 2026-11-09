@@ -188,7 +188,7 @@ fn declared_path_nar_hash(
     let virtual_source = store_hooks::locate(ev, &path).is_some();
     if source::path_snapshot(ev, expect, pos)? {
         // Final locked attrs are already the metadata of the chosen snapshot.
-        // In particular, never infer their timestamp from the mutable origin.
+        // Never infer their timestamp from either the origin or stored bytes.
         return Ok(Ok((*expect, None)));
     }
     let found = if virtual_source {
@@ -201,7 +201,9 @@ fn declared_path_nar_hash(
             pos,
         )?
     };
-    Ok(found.map(|(hash, mtime)| (hash, Some(mtime))))
+    // Nix's final-input hook does not add metadata absent from the lock,
+    // even when it has to ingest the original directory on a cold run.
+    Ok(found.map(|(hash, _)| (hash, None)))
 }
 
 #[derive(Clone, Copy)]
@@ -254,8 +256,7 @@ fn fetch_tree_inner(
             let found = if let (FetchScope::DeclaredInput, Some(expected)) = (scope, exp.as_ref()) {
                 declared_path_nar_hash(ev, path, expected, pos)?
             } else {
-                path_nar_hash(ev, path, exp.as_ref(), pos)?
-                    .map(|(hash, mtime)| (hash, Some(mtime)))
+                path_nar_hash(ev, path, exp.as_ref(), pos)?.map(|(hash, mtime)| (hash, Some(mtime)))
             };
             let (hash, mtime) = match found {
                 Ok(found) => found,

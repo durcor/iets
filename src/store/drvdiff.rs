@@ -88,7 +88,7 @@ fn walk(
         |d: &Derivation| (d.env.iter()).any(|(k, v)| k == "name" && *v == d.name.as_bytes());
     let hide_name = echoes_name(&a) && echoes_name(&b);
     let keep = |(k, _): &&(String, Vec<u8>)| {
-        (!a.outputs.contains_key(k) || !b.outputs.contains_key(k)) && !(hide_name && k == "name")
+        !(a.outputs.contains_key(k) && b.outputs.contains_key(k) || hide_name && k == "name")
     };
     let (ea, eb): (BTreeMap<_, _>, BTreeMap<_, _>) = (
         a.env.iter().filter(keep).map(|(k, x)| (k, x)).collect(),

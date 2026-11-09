@@ -293,12 +293,22 @@ It returns the attributes Nix returns:
 `revCount` has Nix's value, but it is deprecated
 (`docs/reference/lints.md`, `rev-count`).
 
-A `path` input is NAR-hashed, checked against `narHash` when the lock has
-one, and is a virtual copy, like the root. A relative `path:` input
-(`path:./sub`) never reaches `fetchTree`. `nix flake lock` writes it as
-`{ path = "./sub"; type = "path"; }` with no `narHash`, iets accepts that,
-and `call-flake.nix` finds it under the parent's `outPath`. An unlocked
-remote input (no `narHash`) and a URL argument are errors.
+A declared absolute `path` input with a locked `narHash` is an independent
+source, not the parent Git checkout's filtered directory. The private
+`call-flake.nix` hook checks the original location's confinement before
+looking for the expected immutable source in the registered local store or
+the input store. A verified snapshot remains selected after the original
+directory is edited or removed. With no snapshot, iets hashes the whole
+authorized directory natively, including untracked files, and rejects a
+real hash mismatch. The lock's metadata is preserved: a missing
+`lastModified` stays absent, even on a cold run.
+
+This authority is not available through public `builtins.fetchTree`,
+`getFlake`, `builtins.path` or ordinary reads; their existing confinement
+and root-source filters still apply. A relative `path:` input (`path:./sub`)
+without a `narHash` never reaches the hook: `call-flake.nix` finds it under
+the parent's filtered `outPath`. An unlocked remote input (no `narHash`)
+and a URL argument are errors.
 
 ## The root tree
 
@@ -319,5 +329,5 @@ visible. Reading an untracked file fails with Nix's `Path '...' in the
 repository ... is not tracked by Git` error.
 
 iets embeds `call-flake.nix` from Nix 2.34.8 as it is. It calls it with the
-lock file text, `{ root = { sourceInfo; dir; }; }` and
-`builtins.fetchTree`.
+lock file text, `{ root = { sourceInfo; dir; }; }` and a private
+`fetchTreeFinal` hook for declared locked inputs.

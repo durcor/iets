@@ -67,7 +67,8 @@ its pure evaluation claims the confinement, so the check is part of it.
 ## The rule
 
 > In pure evaluation, a fetch from the local file system is a read. It may
-> not leave the root, and it goes through the same accessor as `readFile`.
+> not leave the authorized root. Public fetches use the root's read accessor;
+> a declared locked path input may select its own pinned source.
 
 **The root** is the one a run already has. For a flake it is the tree of the
 flake on the command line: the working tree of its source control system,
@@ -157,9 +158,27 @@ affected: it is read below its parent's tree. An input that is already in
 `/nix/store` or in the input store is not exempt, because the check comes
 first.
 
-**A `path` input inside a working tree.** It is read through the root
-tree's filter, so an untracked file is not part of it, and its `narHash` is
-that of the tracked files. Nix copies the directory whole.
+**A declared locked `path` input inside a working tree.** Its original
+location is confined first, including symlinks, before any cache is asked.
+The private flake-input hook then selects the immutable source named by the
+lock's `narHash`, not the current root tree's filtered copy. A registered
+local source must have matching content-address, NAR hash, size, identity
+and references, or an input-store entry must supply verified source
+metadata. No full immutable source rehash is needed. If no snapshot is
+available, the whole authorized filesystem directory is hashed natively,
+including untracked files; a virtual member retains its existing accessor
+and filter. A mismatching current tree remains an error.
+
+The snapshot stays selected if the original directory changes or vanishes.
+Cached results observe its availability and the original location's
+authorization; a missing original disables trace-result reuse so a dangling
+symlink cannot hide a later escape. The lock's timestamp is retained, and
+an absent timestamp is not invented from mutable or stored mtimes.
+
+This is declared-input authority only. Public `fetchTree` and `getFlake`
+still read through the root filter, and ordinary reads and `builtins.path`
+gain no checkout access. Unpinned relative inputs still read the filtered
+parent source. There is no expression-visible flag for the private hook.
 
 ## What was not done
 

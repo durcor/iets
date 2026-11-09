@@ -600,8 +600,9 @@ commands. A project `iets.toml` may not set it
 Nix's pure evaluation fetches from anywhere on the machine when a hash
 locks the result. iets treats such a fetch as a read: its source may not
 leave the root, which is the tree of the flake on the command line or the
-project, and it is read through that tree
-(`docs/explanation/pure-eval-and-local-sources.md`). These fail in iets
+project. Public fetches read through that tree; declared locked path inputs
+may select their independent pinned source after original-location
+confinement (`docs/explanation/pure-eval-and-local-sources.md`). These fail in iets
 with `access to absolute path '...' is forbidden in pure evaluation mode
 (use '--impure' to override)` where Nix evaluates, under every command name:
 
@@ -619,10 +620,13 @@ asked, so it does not depend on what a cache holds.
 
 Inside the root two things differ:
 
-- A source below the root flake's directory is read through the root tree,
-  so the tree's filter applies. An untracked file is `not tracked by Git`,
-  and a `path` input there has the `narHash` of its tracked files, where
-  Nix copies the directory whole.
+- Public local fetches below the root flake's directory read through the
+  root tree, so its filter applies. An untracked file is `not tracked by Git`,
+  and public `fetchTree` or `getFlake` on a path there hashes tracked files,
+  where Nix copies the directory whole. Declared absolute locked path inputs
+  instead select their verified immutable snapshot, or hash the whole
+  authorized filesystem directory on a cold run. Unpinned relative inputs
+  remain members of their filtered parent tree.
 - A link is resolved on the text of the path, and a link that leaves the
   root is forbidden. This holds for a plain read in a project too:
   `readFile`, `readDir`, `readFileType`, `hashFile`, `builtins.path`,

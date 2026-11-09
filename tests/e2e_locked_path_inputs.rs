@@ -305,9 +305,10 @@ impl Fixture {
         let expr = format!(
             "let t = builtins.fetchTree (builtins.fromJSON {encoded}); in {{ source = t.outPath; info = removeAttrs t [ \"outPath\" ]; }}"
         );
-        let tree = parse(&ok(self.s.nix("nix").args([
-            "eval", "--json", "--impure", "--expr", &expr,
-        ])));
+        let tree = parse(&ok(self
+            .s
+            .nix("nix")
+            .args(["eval", "--json", "--impure", "--expr", &expr])));
         assert_eq!(tree["source"], self.source.to_str().unwrap());
         assert!(valid(&self.s, &self.source, None));
         assert_eq!(hash_path(&self.s, &self.source), self.hash);
@@ -317,9 +318,12 @@ impl Fixture {
         assert_eq!(value["source"], self.source.to_str().unwrap());
         assert_eq!(value["info"]["narHash"], self.hash);
         assert_eq!(
-            value["info"]["lastModified"],
-            self.last_modified.unwrap_or(INPUT_MTIME)
+            value["info"].get("lastModified").and_then(Value::as_u64),
+            self.last_modified
         );
+        if self.last_modified.is_none() {
+            assert!(value["info"].get("lastModifiedDate").is_none());
+        }
         if self.last_modified == Some(LOCK_MTIME) {
             assert_eq!(value["info"]["lastModifiedDate"], "20090213233130");
         }
@@ -335,7 +339,11 @@ impl Fixture {
     }
 
     fn save_expected(&self) {
-        fs::copy(self.input.join("tracked"), self.s.dir().join("expected-tracked")).unwrap();
+        fs::copy(
+            self.input.join("tracked"),
+            self.s.dir().join("expected-tracked"),
+        )
+        .unwrap();
         fs::copy(
             self.input.join("untracked"),
             self.s.dir().join("expected-untracked"),
@@ -345,7 +353,11 @@ impl Fixture {
 
     fn assert_rejected(&self, attr: &str, cached: bool) -> Output {
         let out = self.eval(attr, cached);
-        assert!(!out.status.success(), "unexpectedly exposed {attr}: {}", stdout(&out));
+        assert!(
+            !out.status.success(),
+            "unexpectedly exposed {attr}: {}",
+            stdout(&out)
+        );
         assert!(out.stdout.is_empty(), "rejected {attr} returned a value");
         out
     }
@@ -371,7 +383,10 @@ impl Fixture {
         assert_eq!(fs::read(builder.real(output)).unwrap(), expected);
         let info = path_info(&self.s, output, Some(&builder));
         assert_eq!(info["deriver"], snapshot["drv"]);
-        assert_eq!(hash_path(&self.s, &builder.real(self.source.to_str().unwrap())), self.hash);
+        assert_eq!(
+            hash_path(&self.s, &builder.real(self.source.to_str().unwrap())),
+            self.hash
+        );
         builder
     }
 
@@ -390,7 +405,10 @@ impl Fixture {
             .arg("--dump")
             .arg(builder.real(source)))
         .stdout;
-        assert_eq!(actual, expected, "native consumer received a different source NAR");
+        assert_eq!(
+            actual, expected,
+            "native consumer received a different source NAR"
+        );
         assert_eq!(native["narSize"].as_u64().unwrap(), actual.len() as u64);
     }
 }
@@ -423,6 +441,20 @@ fn cached_legacy_path_keeps_selected_bytes_after_tracked_and_untracked_edits_and
 }
 
 #[test]
+fn missing_locked_timestamp_matches_cold_and_cached_nix_metadata() {
+    let Some(f) = Fixture::new(None) else {
+        return;
+    };
+    f.save_expected();
+    let oracle = f.oracle("snapshot");
+    assert!(oracle["info"].get("lastModified").is_none());
+    assert!(oracle["info"].get("lastModifiedDate").is_none());
+    for cached in [false, true, true] {
+        assert_eq!(f.value("snapshot", cached), oracle);
+    }
+}
+
+#[test]
 fn native_cold_legacy_path_includes_untracked_files_and_builds_before_nix_fetches_it() {
     for last_modified in [Some(LOCK_MTIME), None] {
         let Some(f) = Fixture::new(last_modified) else {
@@ -438,7 +470,10 @@ fn native_cold_legacy_path_includes_untracked_files_and_builds_before_nix_fetche
         }
         let builder = f.assert_build(&native, "cold-consumer");
         let oracle = f.oracle("snapshot");
-        assert_eq!(native, oracle, "source metadata and deterministic drvPath parity");
+        assert_eq!(
+            native, oracle,
+            "source metadata and deterministic drvPath parity"
+        );
         f.assert_nar_parity(&builder);
     }
 }
@@ -460,14 +495,16 @@ fn cold_legacy_path_reports_the_real_full_tree_hash_mismatch() {
         assert!(stderr(&out).contains(&f.hash), "{}", stderr(&out));
         assert!(stderr(&out).contains(&actual), "{}", stderr(&out));
     }
-    let oracle = f
-        .s
-        .nix("nix")
-        .args(["eval", "--json", "--no-write-lock-file"])
-        .arg(f.reference("snapshot"))
-        .output()
-        .unwrap();
-    assert!(!oracle.status.success(), "Nix accepted a genuine cold mismatch");
+    let oracle =
+        f.s.nix("nix")
+            .args(["eval", "--json", "--no-write-lock-file"])
+            .arg(f.reference("snapshot"))
+            .output()
+            .unwrap();
+    assert!(
+        !oracle.status.success(),
+        "Nix accepted a genuine cold mismatch"
+    );
     assert!(!valid(&f.s, &f.source, None));
 }
 
@@ -482,7 +519,11 @@ fn disappearing_cached_source_invalidates_warm_results_and_allows_a_matching_col
     for cached in [false, true, true] {
         assert_eq!(f.value("snapshot", cached), oracle);
     }
-    fs::write(f.input.join("untracked"), "current source no longer matches\n").unwrap();
+    fs::write(
+        f.input.join("untracked"),
+        "current source no longer matches\n",
+    )
+    .unwrap();
     assert_eq!(f.value("snapshot", true), oracle);
     ok(f.s
         .nix("nix-store")
@@ -585,12 +626,16 @@ fn declared_source_authority_does_not_widen_public_reads_path_or_fetch_tree() {
     let selected = f.value("snapshot", false);
     f.assert_snapshot(&selected);
     for cached in [false, true, true] {
-        assert_eq!(f.value("readTracked", cached), selected["tracked"]);
-        for attr in ["publicPath", "publicFilteredFetch"] {
-            let public = f.value(attr, cached);
-            assert_eq!(public["tracked"], selected["tracked"]);
-            assert_eq!(public["hidden"], false, "{attr} exposed checkout-only data");
-        }
+        // Ordinary absolute reads do not gain the private hook's checkout
+        // authority, even for tracked bytes selected by the declared input.
+        f.assert_rejected("readTracked", cached);
+        f.assert_rejected("publicPath", cached);
+        let public = f.value("publicFilteredFetch", cached);
+        assert_eq!(public["tracked"], selected["tracked"]);
+        assert_eq!(
+            public["hidden"], false,
+            "public fetch exposed checkout-only data"
+        );
         for attr in ["readUntracked", "publicFullFetch"] {
             f.assert_rejected(attr, cached);
         }
@@ -602,7 +647,8 @@ fn unpinned_relative_parent_inputs_keep_the_filtered_live_parent_source() {
     let Some(f) = Fixture::new(Some(LOCK_MTIME)) else {
         return;
     };
-    let lock: Value = serde_json::from_slice(&fs::read(f.repo.join("flake.lock")).unwrap()).unwrap();
+    let lock: Value =
+        serde_json::from_slice(&fs::read(f.repo.join("flake.lock")).unwrap()).unwrap();
     assert!(lock["nodes"]["rel"]["locked"].get("narHash").is_none());
     for expected in ["relative one\n", "relative two\n"] {
         fs::write(f.repo.join("rel/tracked"), expected).unwrap();

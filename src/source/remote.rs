@@ -268,11 +268,7 @@ fn hashes_to(path: &Path, method: IngestionMethod, hash: &Hash) -> bool {
 /// Unlike `valid_in_store`, this needs the registered NAR metadata as well as
 /// validity: neither a hash-shaped directory name nor a full mutable-tree hash
 /// is a substitute for the source identity and upload size.
-pub(crate) fn path_snapshot(
-    ev: &mut Evaluator,
-    hash: &Hash,
-    pos: Pos,
-) -> EvalResult<bool> {
+pub(crate) fn path_snapshot(ev: &mut Evaluator, hash: &Hash, pos: Pos) -> EvalResult<bool> {
     let fail = |e: String| Error::boxed(ErrorKind::Io, e, pos);
     let sp = treestore::store_path("source", hash).map_err(|e| fail(e.to_string()))?;
     let full = sp.to_full_string();
@@ -290,14 +286,13 @@ pub(crate) fn path_snapshot(
             Some(conn) => conn
                 .query_path_info(&full, &mut |_| {})
                 .map_err(|e| fail(e.to_string()))?,
-            None
-                if matches!(
-                    nix_conf(ev.session()).store().split('?').next(),
-                    Some("auto" | "daemon" | "local" | "")
-                ) || matches!(
-                    Transport::parse(&nix_conf(ev.session()).store()),
-                    Some(Transport::Unix(_))
-                ) =>
+            None if matches!(
+                nix_conf(ev.session()).store().split('?').next(),
+                Some("auto" | "daemon" | "local" | "")
+            ) || matches!(
+                Transport::parse(&nix_conf(ev.session()).store()),
+                Some(Transport::Unix(_))
+            ) =>
             {
                 // A daemonless local store may still provide metadata. Never
                 // use a remote store's metadata to authenticate local bytes.

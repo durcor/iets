@@ -128,6 +128,16 @@ pub enum Follow {
 /// judge the result. A link the filter hides, or one a pure evaluation may not
 /// read, is left alone, as `maybeLstat` leaves it (filtering-source-accessor.cc).
 pub fn resolve_links(ev: &Evaluator, path: &[u8], mode: Follow, pos: Pos) -> EvalResult<Vec<u8>> {
+    resolve_links_inner(ev, path, mode, pos, false)
+}
+
+fn resolve_links_inner(
+    ev: &Evaluator,
+    path: &[u8],
+    mode: Follow,
+    pos: Pos,
+    declared: bool,
+) -> EvalResult<Vec<u8>> {
     let split = |p: &[u8], out: &mut Vec<Vec<u8>>| {
         out.extend(
             p.split(|&b| b == b'/')
@@ -156,7 +166,7 @@ pub fn resolve_links(ev: &Evaluator, path: &[u8], mode: Follow, pos: Pos) -> Eva
         let Some(target) = resolve(ev, &res).read_link() else {
             continue;
         };
-        if !allowed(ev, &res) {
+        if !(allowed(ev, &res) || declared && in_root_tree(ev, &res).is_some()) {
             continue;
         }
         hops += 1;
@@ -274,9 +284,25 @@ pub(super) fn declared_path_source(
     pos: Pos,
 ) -> EvalResult<(Vec<u8>, SrcPath)> {
     let original = canon_path(path);
-    let (path, at) = located(ev, original.clone(), Follow::Full, pos)?;
-    let virtual_source = at.is_some();
-    let at = check(ev, at, &path, Follow::Full, pos)?;
+    let virtual_source = locate(ev, &original).is_some();
+    let (path, at) = if virtual_source {
+        let (path, at) = located(ev, original.clone(), Follow::Full, pos)?;
+        let at = check(ev, at, &path, Follow::Full, pos)?;
+        (path, at)
+    } else {
+        // Pure flake evaluation allows the final store tree, not its mutable
+        // checkout. Only this private hook also authorizes a declared input
+        // beneath the original root, without applying the root's Git filter.
+        let path = resolve_links_inner(ev, &original, Follow::Full, pos, true)?;
+        if ev.pure()
+            && (!(allowed(ev, &original) || in_root_tree(ev, &original).is_some())
+                || !(allowed(ev, &path) || in_root_tree(ev, &path).is_some()))
+        {
+            return Err(forbidden(&original, pos));
+        }
+        let at = fs_path(&path);
+        (path, at)
+    };
     if !virtual_source {
         match sys::fs::canonicalize(&os(&original)) {
             // Record even an unchanged path: a future link at this location

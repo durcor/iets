@@ -88,8 +88,9 @@ lock wins.
 ## The root flake
 
 Nix's `callFlake` is embedded verbatim and called with the lock file text
-and `builtins.fetchTree`. The root's `sourceInfo` is built as Nix's fetcher
-would build it for the reference the command line implies. A directory
+and a private `fetchTreeFinal` hook for declared locked inputs. The root's
+`sourceInfo` is built as Nix's fetcher would build it for the reference the
+command line implies. A directory
 inside the working tree of a source control system (SCM) is that working
 tree, and anything else is a plain path. A Jujutsu workspace without `.git`
 and a Mercurial working tree are plain paths, as they are for Nix.
@@ -205,6 +206,15 @@ input on this machine, a `file:` URL, a `path` or a local `git` or `hg`
 repository, first passes the allow list of pure evaluation, so that no
 cache answers for a file the evaluation may not read
 ([Pure evaluation and local sources](pure-eval-and-local-sources.md)).
+
+A declared absolute `path` input has independent pinned-source authority:
+after confinement of its original location, a verified snapshot named by
+its `narHash` wins over an edited or deleted checkout directory. With no
+snapshot, iets hashes the whole authorized filesystem directory natively,
+not the parent Git filter; a virtual member keeps its accessor and filter.
+The lock's metadata is final, including an absent `lastModified`. Public
+`fetchTree` and `getFlake` do not have this authority, and unpinned relative
+inputs still use their parent's source.
 
 **`/nix/store`, if the store has the path as valid.** A file at the path is
 not enough: an interrupted build or copy can leave one that the store never
