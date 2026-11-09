@@ -127,6 +127,8 @@ pub fn drvs_in_dir(dir: &Path) -> Result<FxHashMap<StorePath, DrvInfo>> {
 /// input-addressed outputs and their original signatures. Only unavailable
 /// paths return `None`; malformed metadata returns an error. The upload plan
 /// discovers runtime references and clears `ultimate` when copying.
+/// Metadata and bytes share a provider; cached NAR accessors remain replayable
+/// for both worker uploads and gRPC retries without relabeling stored identity.
 pub fn locate_store(paths: &[StorePath]) -> Result<Vec<Option<LocatedSource>>> {
     locate_in_store(paths, &HashMap::new(), &crate::session::Session::current())
 }

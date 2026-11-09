@@ -288,7 +288,7 @@ pub(crate) fn path_snapshot(ev: &mut Evaluator, hash: &Hash, pos: Pos) -> EvalRe
     };
     ev.trace().stat(full.as_bytes(), false, kind);
     if kind != trace::Kind::Missing {
-        if !local_snapshot_metadata_available()
+        if !crate::store::locate::local_metadata_available()
             .map_err(|e| fail(format!("opening local snapshot registration metadata: {e}")))?
         {
             return provider_path_snapshot(ev, &sp, hash, pos);
@@ -296,16 +296,9 @@ pub(crate) fn path_snapshot(ev: &mut Evaluator, hash: &Hash, pos: Pos) -> EvalRe
         // Only the pinned actual-local database can authenticate this filesystem
         // origin. A Unix worker may own another physical store; when direct
         // metadata access is unavailable its bytes must be verified and cached.
-        let found = crate::store::locate::locate_in_store(
-            std::slice::from_ref(&sp),
-            &HashMap::new(),
-            ev.session(),
-        )
-        .map_err(|e| fail(e.to_string()))?;
-        let info = match found.into_iter().next().flatten() {
-            Some(crate::store::locate::LocatedSource::Stored { info, .. }) => Some(info),
-            _ => None,
-        };
+        let found = crate::store::locate::local_path_info(std::slice::from_ref(&sp), ev.session())
+            .map_err(|e| fail(e.to_string()))?;
+        let info = found.into_iter().next().flatten();
         if let Some(info) = info {
             check_path_snapshot(&sp, hash, &info).map_err(fail)?;
             if !matches!(kind, trace::Kind::Directory | trace::Kind::Regular) {
@@ -323,33 +316,6 @@ pub(crate) fn path_snapshot(ev: &mut Evaluator, hash: &Hash, pos: Pos) -> EvalRe
     Ok(false)
 }
 
-/// Ordinary multi-user Nix databases are readable but not writable by the
-/// evaluator. Nix's local provider still requires write access even for queries;
-/// its immutable SQLite mode is unsafe against a live WAL database. Decline that
-/// optional provider, but preserve genuine traversal/read errors and all query
-/// errors rather than disguising them as registration absence.
-fn local_snapshot_metadata_available() -> io::Result<bool> {
-    #[cfg(unix)]
-    {
-        let state = std::env::var_os("NIX_STATE_DIR")
-            .filter(|v| !v.is_empty())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| "/nix/var/nix".into());
-        let db = state.join("db/db.sqlite");
-        match fs::OpenOptions::new().read(true).write(true).open(&db) {
-            Ok(_) => Ok(true),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                fs::File::open(&db).map(|_| false)
-            }
-            Err(e) => Err(e),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(true)
-    }
-}
 
 /// A worker's metadata can name only its own bytes, never an unchecked local
 /// logical path. Populate the private immutable input store once from the same
@@ -367,16 +333,6 @@ fn provider_path_snapshot(
     ) {
         return Ok(false);
     }
-    let _fetching = treestore::fetch_lock(sp.base_name(), || {});
-    if let Some(entry) = treestore::reopen(sp.base_name()) {
-        if entry.nar_hash() != *hash || entry.nar_size() == 0 {
-            return Err(fail(format!(
-                "input store snapshot '{sp}' has inconsistent NAR metadata"
-            )));
-        }
-        adopt(ev, sp, &entry);
-        return Ok(true);
-    }
     let Some(conn) = ev.store.get() else {
         return Ok(false);
     };
@@ -388,57 +344,18 @@ fn provider_path_snapshot(
         return Ok(false);
     };
     check_path_snapshot(sp, hash, &info).map_err(fail)?;
-    let staged = treestore::stage(sp.base_name())
-        .ok_or_else(|| fail("iets has no cache directory to hold a locked snapshot".into()))?;
-    let mut file = spool::spool_file(staged.dir()).map_err(|e| fail(e.to_string()))?;
-    let mut root = None;
-    let result = conn.nar_from_path(&full, &mut |_| {}, &mut |r| {
-        let (node, size) = spool::index_nar(&mut r.take(info.nar_size), &mut file)?;
-        if size != info.nar_size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "locked path snapshot '{full}' NAR size mismatch: expected {}, got {size}",
-                    info.nar_size
-                ),
-            ));
+    let cached = crate::store::locate::cache_nar(conn, &info);
+    let (key, entry) = match cached {
+        Ok(cached) => cached,
+        Err(e) => {
+            ev.store.conn = None;
+            return Err(fail(e.to_string()));
         }
-        if !matches!(node, spool::Node::Dir(_) | spool::Node::File { .. }) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("locked path snapshot '{full}' is not a file or directory"),
-            ));
-        }
-        root = Some(node);
-        Ok(())
-    });
-    if let Err(e) = result {
-        ev.store.conn = None;
-        return Err(fail(e.to_string()));
-    }
-    let tree = spool::Tree::spooled(file, root.expect("successful NAR callback"));
-    let entry =
-        treestore::put("source", IngestionMethod::Recursive, hash, staged, tree).map_err(|e| {
-            match e {
-                Rejected::Mismatch(actual) => Error::boxed(
-                    ErrorKind::HashMismatch,
-                    format!(
-                        "NAR hash mismatch in locked path snapshot '{sp}': expected '{}', got '{}'",
-                        hash.to_sri(),
-                        actual.to_sri()
-                    ),
-                    pos,
-                ),
-                Rejected::Io(e) => fail(e.to_string()),
-                Rejected::Unstorable => {
-                    fail("iets cannot keep a locked snapshot in the input store".into())
-                }
-            }
-        })?;
-    if entry.nar_size() != info.nar_size {
-        return Err(fail(format!(
-            "locked path snapshot '{sp}' has inconsistent canonical NAR size"
-        )));
+    };
+    if key != *sp
+        || !matches!(entry.stat(b"", false), Some(nar::FileType::Directory | nar::FileType::Regular))
+    {
+        return Err(fail(format!("locked path snapshot '{sp}' is not a file or directory")));
     }
     adopt(ev, sp, &entry);
     Ok(true)

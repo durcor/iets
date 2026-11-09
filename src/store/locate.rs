@@ -1,7 +1,9 @@
-//! Where the local store keeps an input source.
+//! Registered source metadata and bytes, kept in the same store namespace.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
+use std::fs;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,10 +12,14 @@ use std::thread;
 
 use crate::error::{self, Error as CrateError};
 use crate::nixbin;
+use crate::fetch::spool;
 use crate::remote::path_info::PathInfo;
+use crate::remote::worker::{Connection, Transport};
 use crate::session::Session;
-use crate::store::path::{StorePath, store_dir};
+use crate::store::hash::{Hash, HashAlgo};
+use crate::store::path::{IngestionMethod, StorePath, store_dir};
 use crate::store::source::{SourceKind, SourceOrigin, SrcPath};
+use crate::treestore::{self, Rejected, StoredTree};
 
 /// A native source origin, or a registered store path whose identity and metadata
 /// must survive copying even when it is not content-addressed.
@@ -113,75 +119,147 @@ fn local_metadata_store(session: &Session) -> bool {
         || (!store.contains('?') && store.starts_with("unix://"))
 }
 
-/// Answers the plan's locator from the same local filesystem store as its bytes.
-/// The session's effective selection must permit an unrelocated local store.
-/// `--source` overrides remain ordinary native sources. Only genuinely
-/// unavailable paths (including unsupported store namespaces) are `None`.
+/// Actual-local metadata is optional on a multiuser installation: Nix requires
+/// write access even for queries. Never open a live WAL database as immutable.
+pub(crate) fn local_metadata_available() -> io::Result<bool> {
+    let state = std::env::var_os("NIX_STATE_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "/nix/var/nix".into());
+    let db = state.join("db/db.sqlite");
+    match fs::OpenOptions::new().read(true).write(true).open(&db) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => fs::File::open(db).map(|_| false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Metadata-only authority for actual local filesystem bytes. This is not a
+/// general source locator: an arbitrary worker cannot authenticate these bytes.
+pub(crate) fn local_path_info(
+    paths: &[StorePath],
+    session: &Session,
+) -> error::Result<Vec<Option<PathInfo>>> {
+    if !local_metadata_store(session) {
+        return Ok(vec![None; paths.len()]);
+    }
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ask: Vec<String> = paths.iter().map(StorePath::to_string).collect();
+    let out = Command::new(nixbin::nix())
+        // Explicit selection outranks ambient configuration and NIX_REMOTE.
+        .args(["--store", "local", "--extra-experimental-features", "nix-command", "path-info", "--json"])
+        .args(&ask)
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|e| CrateError::io("nix path-info", e))?;
+    let info: HashMap<String, serde_json::Value> = serde_json::from_slice(&out.stdout)
+        .map_err(|e| CrateError::Protocol(format!("nix path-info: {e}")))?;
+    let unavailable = ask.iter().all(|p| info.contains_key(p))
+        && ask.iter().any(|p| info.get(p).is_some_and(|v| v.is_null()));
+    if !out.status.success() && !unavailable {
+        return Err(CrateError::Protocol("nix path-info failed".into()));
+    }
+    paths.iter().map(|p| {
+        let v = info.get(&p.to_string()).ok_or_else(|| CrateError::Protocol(format!("nix path-info omitted '{p}'")))?;
+        if v.is_null() { Ok(None) } else { PathInfo::from_json(p.clone(), v).map(Some) }
+    }).collect()
+}
+
+/// Retain provider bytes once in the existing verified content cache. The cache
+/// key describes only the NAR, never the original object's IA/CA identity or
+/// references; callers retain its complete PathInfo separately for registration.
+pub(crate) fn cache_nar(
+    conn: &mut Connection,
+    info: &PathInfo,
+) -> error::Result<(StorePath, Arc<StoredTree>)> {
+    let hash = Hash::parse_any(&info.nar_hash, Some(HashAlgo::Sha256))?;
+    if info.nar_size == 0 {
+        return Err(CrateError::Protocol(format!("'{}' has an empty registered NAR", info.path)));
+    }
+    let key = treestore::store_path("source", &hash)?;
+    let _fetching = treestore::fetch_lock(key.base_name(), || {});
+    let entry = if let Some(entry) = treestore::reopen(key.base_name()) {
+        entry
+    } else {
+        let staged = treestore::stage(key.base_name())
+            .ok_or_else(|| CrateError::Protocol("iets has no cache directory to hold provider bytes".into()))?;
+        let mut file = spool::spool_file(staged.dir()).map_err(|e| CrateError::io("staging provider NAR", e))?;
+        let mut root = None;
+        conn.nar_from_path(&info.path.to_string(), &mut |_| {}, &mut |r| {
+            let (node, size) = spool::index_nar(&mut r.take(info.nar_size), &mut file)?;
+            if size != info.nar_size {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("'{}' NAR size mismatch: expected {}, got {size}", info.path, info.nar_size)));
+            }
+            root = Some(node);
+            Ok(())
+        })?;
+        let tree = spool::Tree::spooled(file, root.expect("successful NAR callback"));
+        treestore::put("source", IngestionMethod::Recursive, &hash, staged, tree).map_err(|e| match e {
+            Rejected::Mismatch(actual) => CrateError::Protocol(format!("NAR hash mismatch for '{}': expected '{}', got '{}'", info.path, hash.to_sri(), actual.to_sri())),
+            Rejected::Io(e) => CrateError::io("keeping provider NAR", e),
+            Rejected::Unstorable => CrateError::Protocol("iets cannot keep provider bytes in the input store".into()),
+        })?
+    };
+    if entry.nar_hash() != hash || entry.nar_size() != info.nar_size {
+        return Err(CrateError::Protocol(format!("'{}' has inconsistent canonical NAR metadata", info.path)));
+    }
+    Ok((key, entry))
+}
+
+/// Locate unknown registered sources for every upload shape. Worker metadata
+/// and bytes always come from one connection; verified cache accessors can be
+/// replayed by worker/gRPC writers and retries without contacting that provider.
 pub fn locate_in_store(
     paths: &[StorePath],
     overrides: &HashMap<String, PathBuf>,
     session: &Session,
 ) -> error::Result<Vec<Option<LocatedSource>>> {
-    let local_store = local_metadata_store(session);
-    let ask: Vec<String> = paths
-        .iter()
-        .map(|p| p.to_string())
-        .filter(|p| local_store && !overrides.contains_key(p))
-        .collect();
-    let mut info: HashMap<String, serde_json::Value> = HashMap::new();
-    if !ask.is_empty() {
-        let out = Command::new(nixbin::nix())
-            // Explicit CLI selection outranks both nix.conf and NIX_REMOTE.
-            // `local` uses the inherited NIX_STORE_DIR/NIX_STATE_DIR namespace,
-            // exactly where the filesystem origin below is read. In particular,
-            // do not forward a relocated store's URL to authenticate these bytes.
-            .args(["--store", "local"])
-            .args([
-                "--extra-experimental-features",
-                "nix-command",
-                "path-info",
-                "--json",
-            ])
-            .args(&ask)
-            .stderr(Stdio::inherit())
-            .output()
-            .map_err(|e| CrateError::io("nix path-info", e))?;
-        info = serde_json::from_slice(&out.stdout)
-            .map_err(|e| CrateError::Protocol(format!("nix path-info: {e}")))?;
-        // Some Nix versions return nonzero for InvalidPath while still reporting
-        // a complete JSON answer with null entries. Only that structured absence
-        // is substitution, not a failed command or malformed metadata.
-        let unavailable = ask.iter().all(|p| info.contains_key(p))
-            && ask.iter().any(|p| info.get(p).is_some_and(|v| v.is_null()));
-        if !out.status.success() && !unavailable {
-            return Err(CrateError::Protocol("nix path-info failed".into()));
+    let cfg = session.nix_conf.get_or_init(|| {
+        crate::config::Config::read(&[]).unwrap_or_else(|_| crate::config::Config::empty())
+    });
+    let unknown: Vec<StorePath> = paths.iter().filter(|p| !overrides.contains_key(&p.to_string())).cloned().collect();
+    let mut found = HashMap::new();
+    if !unknown.is_empty() {
+        let transport = Transport::parse(&cfg.store());
+        let opened = transport.as_ref().filter(|t| !matches!(t, Transport::Grpc(_)))
+            .map(|t| Connection::open(t, &mut |_| {})).transpose();
+        match opened {
+            Ok(Some(mut conn)) => {
+                for p in &unknown {
+                    let located = match conn.query_path_info(&p.to_string(), &mut |_| {})? {
+                        None => None,
+                        Some(info) => {
+                            if info.path != *p {
+                                return Err(CrateError::Protocol(format!("provider returned '{}' for '{p}'", info.path)));
+                            }
+                            let (key, _) = cache_nar(&mut conn, &info)?;
+                            Some(LocatedSource::Stored { at: SrcPath::spool(key.base_name(), b""), info })
+                        }
+                    };
+                    found.insert(p.clone(), located);
+                }
+            }
+            opened => {
+                if local_metadata_store(session) && local_metadata_available().map_err(|e| CrateError::io("opening local registration metadata", e))? {
+                    for (p, info) in unknown.iter().zip(local_path_info(&unknown, session)?) {
+                        found.insert(p.clone(), info.map(|info| LocatedSource::Stored {
+                            at: SrcPath::fs(format!("{}/{}", store_dir(), p.base_name()), None), info,
+                        }));
+                    }
+                } else if let Err(e) = opened {
+                    return Err(e);
+                }
+            }
         }
     }
-    paths
-        .iter()
-        .map(|p| {
-            let full = p.to_string();
-            if let Some(local) = overrides.get(&full) {
-                return Ok(Some(LocatedSource::Source(SourceOrigin {
-                    at: SrcPath::fs(local.clone(), None),
-                    kind: SourceKind::Source,
-                    nar: None,
-                })));
-            }
-            if !local_store {
-                return Ok(None);
-            }
-            // `null` is what `nix path-info` prints for a path that is not valid.
-            let v = info
-                .get(&full)
-                .ok_or_else(|| CrateError::Protocol(format!("nix path-info omitted '{p}'")))?;
-            if v.is_null() {
-                return Ok(None);
-            }
-            Ok(Some(LocatedSource::Stored {
-                at: SrcPath::fs(format!("{}/{}", store_dir(), p.base_name()), None),
-                info: PathInfo::from_json(p.clone(), v)?,
-            }))
-        })
-        .collect()
+    Ok(paths.iter().map(|p| {
+        if let Some(local) = overrides.get(&p.to_string()) {
+            Some(LocatedSource::Source(SourceOrigin { at: SrcPath::fs(local.clone(), None), kind: SourceKind::Source, nar: None }))
+        } else {
+            found.get(p).cloned().flatten()
+        }
+    }).collect())
 }

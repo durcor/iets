@@ -597,6 +597,16 @@ fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_signed_ia_and_ca() {
         output_refs: Vec::new(),
     };
     let ca_consumer = control.consumer(&s, "source-transfer-trust-control-consumer");
+    let provider = s.builder("untrusted-source-provider", &[]);
+    ok(s.nix("nix").args(["copy", "--to", &provider.url(), &consumer.drv, &ca_consumer.drv]));
+    let conf = s.dir().join("conf/nix.conf");
+    let text = fs::read_to_string(&conf).unwrap();
+    fs::write(conf, format!("{text}store = {}\n", provider.url())).unwrap();
+    let database = s.dir().join("var/db/db.sqlite");
+    let lock = s.dir().join("var/db/big-lock");
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(fs::OpenOptions::new().write(true).open(&database).is_err());
     assert!(!valid(&s, &control.input, Some(&b)));
     let accepted = ok(s
         .iets()
@@ -658,10 +668,14 @@ fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_signed_ia_and_ca() {
     // Only fixture-local keys and daemon options participate. Signing must
     // change neither store identity, NAR bytes, nor any other copied metadata.
     ok(s.nix("nix")
-        .args(["store", "sign", "--key-file"])
+        .args(["--store", &provider.url(), "store", "sign", "--key-file"])
         .arg(&secret_key)
         .arg(&fixture.input));
-    let signed = Source::read(&s, fixture.input.clone());
+    let signed = Source {
+        path: fixture.input.clone(),
+        bytes: fs::read(&fixture.input).unwrap(),
+        info: path_info(&s, &fixture.input, Some(&provider)),
+    };
     assert_eq!(signed.bytes, fixture.sources[0].bytes);
     let signatures = signed.info["signatures"].as_array().unwrap();
     assert_eq!(signatures.len(), 1);
@@ -723,4 +737,88 @@ fn an_untrusted_destination_rejects_unsigned_ia_but_accepts_signed_ia_and_ca() {
     );
     assert!(!valid(&s, &consumer.out, Some(&stream)));
     consumer.build(&s, &stream, &fixture);
+    assert!(fs::OpenOptions::new().write(true).open(&database).is_err());
+    assert_eq!(fs::metadata(&lock).unwrap().permissions().mode() & 0o777, 0o444);
+    fs::set_permissions(database, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(lock, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+/// The actual-local database is genuinely read-only for the client. A distinct
+/// daemon namespace owns the registered bytes, just as a root-owned multiuser
+/// daemon does; its metadata must never authenticate the logical local files.
+#[test]
+fn readonly_unknown_sources_preserve_fixed_and_streamed_identity_and_provider_bytes() {
+    let s = store!(("keep-derivations", "false"));
+    let fixture = Fixture::new(&s, true);
+    let consumer = fixture.consumer(&s, "readonly-source-consumer");
+    let provider = s.builder("readonly-provider", &[]);
+    ok(s.nix("nix").args(["copy", "--to", &provider.url(), &consumer.drv]));
+    let expected_nars: Vec<_> = fixture.sources.iter().map(|source| {
+        ok(s.nix("nix-store").args(["--dump", &source.path])).stdout
+    }).collect();
+    // The registered IA leaf in the selected provider is correct, while its
+    // logical filesystem counterpart is wrong and must not be copied.
+    let leaf = &fixture.sources[0];
+    fs::set_permissions(&leaf.path, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(&leaf.path, vec![b'x'; leaf.bytes.len()]).unwrap();
+    let database = s.dir().join("var/db/db.sqlite");
+    let lock = s.dir().join("var/db/big-lock");
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(fs::OpenOptions::new().write(true).open(&database).is_err());
+    let direct = s.nix("nix").args(["--store", "local", "path-info", "--json", &leaf.path]).output().unwrap();
+    assert!(!direct.status.success(), "direct-local metadata must be unavailable");
+    for streamed in [false, true] {
+        let b = s.builder(if streamed { "readonly-stream" } else { "readonly-fixed" }, &[("require-sigs", "true")]);
+        let mut command = s.iets();
+        command.env("IETS_NIX_BIN_DIR", s.no_nix());
+        if streamed {
+            let jobs = s.write("readonly-jobs.nix", "{ job = import ./readonly-source-consumer.nix; }\n");
+            ok(command.args(["eval-jobs", "--eval-store", &b.url(), "--workers", "1", "--impure", "--option", "store", &provider.url()]).arg(jobs));
+            assert!(!valid(&s, &consumer.out, Some(&b)));
+            fixture.assert_destination(&s, &b);
+            assert_eq!(fs::read(b.real(&consumer.drv)).unwrap(), consumer.drv_bytes);
+        }
+        let out = ok(s.iets().env("IETS_NIX_BIN_DIR", s.no_nix()).args(["build", "--builder", &b.url(), "--option", "store", &provider.url()]).arg(&consumer.drv));
+        consumer.assert_result(&s, &b, &fixture, &out);
+        for (source, expected) in fixture.sources.iter().zip(&expected_nars) {
+            assert_eq!(ok(s.nix("nix-store").arg("--dump").arg(b.real(&source.path))).stdout, *expected);
+        }
+        assert_eq!(fs::metadata(&database).unwrap().permissions().mode() & 0o777, 0o444);
+        assert_eq!(fs::metadata(&lock).unwrap().permissions().mode() & 0o777, 0o444);
+        assert!(fs::OpenOptions::new().write(true).open(&database).is_err());
+    }
+    fs::set_permissions(database, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(lock, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+#[test]
+fn unknown_ia_metadata_cannot_authenticate_corrupt_provider_bytes() {
+    let s = store!(("keep-derivations", "false"));
+    let fixture = Fixture::new(&s, false);
+    let consumer = fixture.consumer(&s, "corrupt-provider-consumer");
+    let provider = s.builder("corrupt-provider", &[]);
+    ok(s.nix("nix").args(["copy", "--to", &provider.url(), &consumer.drv]));
+    let source = &fixture.sources[0];
+    let physical = provider.real(&source.path);
+    fs::set_permissions(&physical, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(&physical, vec![b'x'; source.bytes.len()]).unwrap();
+    let actual = stdout(&ok(s.nix("nix").args(["hash", "path"]).arg(physical)));
+    assert_ne!(actual, source.info["narHash"].as_str().unwrap());
+    assert_eq!(identity(&path_info(&s, &source.path, Some(&provider))), identity(&source.info));
+    let database = s.dir().join("var/db/db.sqlite");
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).unwrap();
+    let target = s.builder("corrupt-target", &[]);
+    let out = s.iets().env("IETS_NIX_BIN_DIR", s.no_nix())
+        .args(["build", "--builder", &target.url(), "--option", "store", &provider.url()])
+        .arg(&consumer.drv).output().unwrap();
+    assert!(!out.status.success());
+    let error = e2e::stderr(&out);
+    assert!(error.contains("NAR hash mismatch"), "{error}");
+    assert!(error.contains(&actual), "{error}");
+    assert!(error.contains(source.info["narHash"].as_str().unwrap()), "{error}");
+    assert!(!valid(&s, &source.path, Some(&target)));
+    assert!(!valid(&s, &consumer.out, Some(&target)));
+    assert!(fs::OpenOptions::new().write(true).open(&database).is_err());
+    fs::set_permissions(database, fs::Permissions::from_mode(0o644)).unwrap();
 }
