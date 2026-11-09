@@ -915,8 +915,17 @@ fn a_read_only_local_database_uses_verified_native_provider_bytes_then_its_own_c
         };
         f.save_expected();
         let remote = f.s.builder("native-snapshot-provider", &[]);
-        let added = stdout(&ok(f.s.nix("nix")
-            .args(["--store", &remote.store(), "store", "add-path", "--name", "source"])
+        let added = stdout(&ok(f
+            .s
+            .nix("nix")
+            .args([
+                "--store",
+                &remote.store(),
+                "store",
+                "add-path",
+                "--name",
+                "source",
+            ])
             .arg(&f.input)));
         let registered = path_info(&f.s, &added, Some(&remote));
         assert_eq!(registered["narHash"], f.hash);
@@ -934,8 +943,18 @@ fn a_read_only_local_database_uses_verified_native_provider_bytes_then_its_own_c
             let mut cmd = f.native();
             cmd.env("IETS_NIX_BIN_DIR", f.s.no_nix())
                 .env("NIX_DAEMON_SOCKET_PATH", &socket)
-                .args(["eval", "--json", "--pure-eval", "--option", "store",
-                    if selection == "explicit-uri" { &uri } else { selection }]);
+                .args([
+                    "eval",
+                    "--json",
+                    "--pure-eval",
+                    "--option",
+                    "store",
+                    if selection == "explicit-uri" {
+                        &uri
+                    } else {
+                        selection
+                    },
+                ]);
             if !cached {
                 cmd.args(["--no-cache", "--no-tracing-cache"]);
             }
@@ -956,7 +975,12 @@ fn a_read_only_local_database_uses_verified_native_provider_bytes_then_its_own_c
         assert_eq!(source_identity(&uploaded), source_identity(&registered));
         write_input(&f.s, &f.input, true);
         for cached in [false, true, true] {
-            for attr in ["readTracked", "readUntracked", "publicPath", "publicFullFetch"] {
+            for attr in [
+                "readTracked",
+                "readUntracked",
+                "publicPath",
+                "publicFullFetch",
+            ] {
                 f.assert_rejected(attr, cached);
             }
             let public = f.value("publicFilteredFetch", cached);
@@ -981,8 +1005,17 @@ fn native_provider_metadata_does_not_authenticate_changed_provider_bytes() {
         return;
     };
     let remote = f.s.builder("changed-snapshot-provider", &[]);
-    let added = stdout(&ok(f.s.nix("nix")
-        .args(["--store", &remote.store(), "store", "add-path", "--name", "source"])
+    let added = stdout(&ok(f
+        .s
+        .nix("nix")
+        .args([
+            "--store",
+            &remote.store(),
+            "store",
+            "add-path",
+            "--name",
+            "source",
+        ])
         .arg(&f.input)));
     let tracked = remote.real(&added).join("tracked");
     let mut changed = fs::read(&tracked).unwrap();
@@ -997,9 +1030,21 @@ fn native_provider_metadata_does_not_authenticate_changed_provider_bytes() {
     let database = f.s.dir().join("var/db/db.sqlite");
     let permissions = fs::metadata(&database).unwrap().permissions();
     fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).unwrap();
-    let out = f.native().env("IETS_NIX_BIN_DIR", f.s.no_nix())
-        .args(["eval", "--json", "--pure-eval", "--no-cache", "--option", "store", &remote.url()])
-        .arg(f.reference("snapshot")).output().unwrap();
+    let out = f
+        .native()
+        .env("IETS_NIX_BIN_DIR", f.s.no_nix())
+        .args([
+            "eval",
+            "--json",
+            "--pure-eval",
+            "--no-cache",
+            "--option",
+            "store",
+            &remote.url(),
+        ])
+        .arg(f.reference("snapshot"))
+        .output()
+        .unwrap();
     fs::set_permissions(&database, permissions).unwrap();
     assert!(!out.status.success(), "{}", stdout(&out));
     assert!(out.stdout.is_empty());

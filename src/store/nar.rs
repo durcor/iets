@@ -547,7 +547,10 @@ impl<'a> Reader<'a> {
                 } else {
                     self.consume(&TOK_REG, "'regular' 'contents'")?;
                 }
-                Ok(ParsedNode::Regular { size: self.u64()?, executable: tag == TAG_EXE })
+                Ok(ParsedNode::Regular {
+                    size: self.u64()?,
+                    executable: tag == TAG_EXE,
+                })
             }
             TAG_SYM => {
                 self.consume(&TOK_SYM, "'symlink' 'target'")?;
@@ -581,7 +584,6 @@ impl<'a> Reader<'a> {
     pub(crate) fn end_node(&mut self) -> io::Result<()> {
         self.consume(&TOK_PAR, "')'")
     }
-
 
     /// Reads more of the source, sliding what is left of the window to the front.
     fn refill(&mut self) -> io::Result<()> {
@@ -845,7 +847,6 @@ pub fn parse_length(source: &mut dyn Read) -> io::Result<u64> {
     parse_node(&mut r, &mut name, &mut Vec::new(), 0)?;
     Ok(r.consumed)
 }
-
 
 /// `prev[d]` is the last entry name read at depth `d`.
 fn parse_node(

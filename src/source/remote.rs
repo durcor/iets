@@ -288,9 +288,9 @@ pub(crate) fn path_snapshot(ev: &mut Evaluator, hash: &Hash, pos: Pos) -> EvalRe
     };
     ev.trace().stat(full.as_bytes(), false, kind);
     if kind != trace::Kind::Missing {
-        if !local_snapshot_metadata_available().map_err(|e| {
-            fail(format!("opening local snapshot registration metadata: {e}"))
-        })? {
+        if !local_snapshot_metadata_available()
+            .map_err(|e| fail(format!("opening local snapshot registration metadata: {e}")))?
+        {
             return provider_path_snapshot(ev, &sp, hash, pos);
         }
         // Only the pinned actual-local database can authenticate this filesystem
@@ -361,13 +361,18 @@ fn provider_path_snapshot(
     pos: Pos,
 ) -> EvalResult<bool> {
     let fail = |e: String| Error::boxed(ErrorKind::Io, e, pos);
-    if !matches!(Transport::parse(&nix_conf(ev.session()).store()), Some(Transport::Unix(_))) {
+    if !matches!(
+        Transport::parse(&nix_conf(ev.session()).store()),
+        Some(Transport::Unix(_))
+    ) {
         return Ok(false);
     }
     let _fetching = treestore::fetch_lock(sp.base_name(), || {});
     if let Some(entry) = treestore::reopen(sp.base_name()) {
         if entry.nar_hash() != *hash || entry.nar_size() == 0 {
-            return Err(fail(format!("input store snapshot '{sp}' has inconsistent NAR metadata")));
+            return Err(fail(format!(
+                "input store snapshot '{sp}' has inconsistent NAR metadata"
+            )));
         }
         adopt(ev, sp, &entry);
         return Ok(true);
@@ -376,7 +381,10 @@ fn provider_path_snapshot(
         return Ok(false);
     };
     let full = sp.to_full_string();
-    let Some(info) = conn.query_path_info(&full, &mut |_| {}).map_err(|e| fail(e.to_string()))? else {
+    let Some(info) = conn
+        .query_path_info(&full, &mut |_| {})
+        .map_err(|e| fail(e.to_string()))?
+    else {
         return Ok(false);
     };
     check_path_snapshot(sp, hash, &info).map_err(fail)?;
@@ -387,13 +395,19 @@ fn provider_path_snapshot(
     let result = conn.nar_from_path(&full, &mut |_| {}, &mut |r| {
         let (node, size) = spool::index_nar(&mut r.take(info.nar_size), &mut file)?;
         if size != info.nar_size {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
-                "locked path snapshot '{full}' NAR size mismatch: expected {}, got {size}", info.nar_size
-            )));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "locked path snapshot '{full}' NAR size mismatch: expected {}, got {size}",
+                    info.nar_size
+                ),
+            ));
         }
         if !matches!(node, spool::Node::Dir(_) | spool::Node::File { .. }) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
-                format!("locked path snapshot '{full}' is not a file or directory")));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("locked path snapshot '{full}' is not a file or directory"),
+            ));
         }
         root = Some(node);
         Ok(())
@@ -403,12 +417,23 @@ fn provider_path_snapshot(
         return Err(fail(e.to_string()));
     }
     let tree = spool::Tree::spooled(file, root.expect("successful NAR callback"));
-    let entry = treestore::put("source", IngestionMethod::Recursive, hash, staged, tree)
-        .map_err(|e| match e {
-            Rejected::Mismatch(actual) => Error::boxed(ErrorKind::HashMismatch,
-                format!("NAR hash mismatch in locked path snapshot '{sp}': expected '{}', got '{}'", hash.to_sri(), actual.to_sri()), pos),
-            Rejected::Io(e) => fail(e.to_string()),
-            Rejected::Unstorable => fail("iets cannot keep a locked snapshot in the input store".into()),
+    let entry =
+        treestore::put("source", IngestionMethod::Recursive, hash, staged, tree).map_err(|e| {
+            match e {
+                Rejected::Mismatch(actual) => Error::boxed(
+                    ErrorKind::HashMismatch,
+                    format!(
+                        "NAR hash mismatch in locked path snapshot '{sp}': expected '{}', got '{}'",
+                        hash.to_sri(),
+                        actual.to_sri()
+                    ),
+                    pos,
+                ),
+                Rejected::Io(e) => fail(e.to_string()),
+                Rejected::Unstorable => {
+                    fail("iets cannot keep a locked snapshot in the input store".into())
+                }
+            }
         })?;
     if entry.nar_size() != info.nar_size {
         return Err(fail(format!(

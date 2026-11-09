@@ -248,15 +248,26 @@ fn index_nar_node(
 ) -> io::Result<Node> {
     use crate::store::nar::ParsedNode;
     if depth >= NAR_MAX_DEPTH {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "NAR directory nesting too deep"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "NAR directory nesting too deep",
+        ));
     }
     let node = match reader.next_node()? {
         ParsedNode::Regular { size, executable } => {
-            let at = Blob::Spool { offset: *offset, size, sparse: false };
-            *offset = offset.checked_add(size).ok_or_else(||
-                io::Error::new(io::ErrorKind::InvalidData, "NAR contents too large"))?;
+            let at = Blob::Spool {
+                offset: *offset,
+                size,
+                sparse: false,
+            };
+            *offset = offset.checked_add(size).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "NAR contents too large")
+            })?;
             reader.contents_to(spool, size)?;
-            Node::File { at, exec: executable }
+            Node::File {
+                at,
+                exec: executable,
+            }
         }
         ParsedNode::Symlink(target) => Node::Symlink(target),
         ParsedNode::Directory => {
@@ -1364,7 +1375,11 @@ pub(crate) mod tests {
         invalid_name[at] = b'/';
         let mut invalid_padding = expected.clone();
         *invalid_padding.last_mut().unwrap() = 1;
-        for bytes in [&expected[..expected.len() - 1], &invalid_name, &invalid_padding] {
+        for bytes in [
+            &expected[..expected.len() - 1],
+            &invalid_name,
+            &invalid_padding,
+        ] {
             assert!(index_nar(&mut &bytes[..], &mut scratch().unwrap()).is_err());
         }
     }
