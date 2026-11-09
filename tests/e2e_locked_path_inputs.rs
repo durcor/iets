@@ -797,7 +797,7 @@ fn unix_metadata_cannot_authenticate_another_filesystem_namespace_through_any_se
             fs::create_dir_all(&sockets).unwrap();
             symlink(remote.socket(), sockets.join("socket")).unwrap();
         }
-        let native = |cached| {
+        let native = |cached: bool| {
             let mut cmd = f.native();
             cmd.args(["eval", "--json", "--pure-eval"]);
             if !cached {
