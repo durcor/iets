@@ -11,7 +11,7 @@ pub mod flakeref;
 use std::path::{Path, PathBuf};
 use std::{fs, io, mem};
 
-use crate::builtins::fetch::{self, fetch_tree};
+use crate::builtins::fetch;
 use crate::builtins::store_hooks::locate;
 use crate::compile;
 use crate::compile::ir::ParamIr;
@@ -419,11 +419,13 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
     let ov = ev.mk_attrs(&mut ov, pos)?;
     let mut overrides = vec![(ev.sym(lock.root.as_bytes()), pos, ov)];
     let overrides = ev.mk_attrs(&mut overrides, pos)?;
-    // its own primop, not the one in `builtins`: in classic mode that
-    // one is there only with `fetch-tree` or `flakes` (`builtins::exposed`),
-    // and `call-flake.nix` needs it either way
-    let fetch_sym = ev.sym(b"fetchTree");
-    let fetch_tree = ev.arena.mk_primop("fetchTree", 1, fetch_tree, fetch_sym);
+    // Its own private fetchTreeFinal authority, not the public fetchTree:
+    // declared locked path inputs are independent pinned sources. Public
+    // local fetches and pinned getFlake retain the ordinary filtered policy.
+    let fetch_sym = ev.sym(b"fetchTreeFinal");
+    let fetch_tree = ev
+        .arena
+        .mk_primop("fetchTreeFinal", 1, fetch::fetch_tree_final, fetch_sym);
     ev.apply(call_flake, &[lock_str, overrides, fetch_tree], pos)
 }
 

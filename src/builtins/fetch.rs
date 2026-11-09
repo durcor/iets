@@ -175,7 +175,55 @@ pub(crate) fn path_nar_hash(
     })
 }
 
+/// Only the private call-flake hook may select a locked path's independent
+/// source. Public fetchTree and pinned getFlake keep `path_nar_hash`'s filtered
+/// read policy; no expression can request this authority as an attribute.
+fn declared_path_nar_hash(
+    ev: &mut Evaluator,
+    path: &str,
+    expect: &Hash,
+    pos: Pos,
+) -> EvalResult<Result<(Hash, Option<i64>), Hash>> {
+    let (path, at) = store_hooks::declared_path_source(ev, path.as_bytes(), pos)?;
+    let virtual_source = store_hooks::locate(ev, &path).is_some();
+    if source::path_snapshot(ev, expect, pos)? {
+        // Final locked attrs are already the metadata of the chosen snapshot.
+        // In particular, never infer their timestamp from the mutable origin.
+        return Ok(Ok((*expect, None)));
+    }
+    let found = if virtual_source {
+        path_nar_hash(ev, &String::from_utf8_lossy(&path), Some(expect), pos)?
+    } else {
+        source::path_tree(
+            ev,
+            &at.local().expect("a filesystem source has a local path"),
+            Some(expect),
+            pos,
+        )?
+    };
+    Ok(found.map(|(hash, mtime)| (hash, Some(mtime))))
+}
+
+#[derive(Clone, Copy)]
+enum FetchScope {
+    Public,
+    DeclaredInput,
+}
+
+pub(crate) fn fetch_tree_final(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
+    fetch_tree_inner(ev, args, pos, FetchScope::DeclaredInput)
+}
+
 pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
+    fetch_tree_inner(ev, args, pos, FetchScope::Public)
+}
+
+fn fetch_tree_inner(
+    ev: &mut Evaluator,
+    args: &[Word],
+    pos: Pos,
+    scope: FetchScope,
+) -> EvalResult<Word> {
     purity::unhashed_fetch(ev, "fetchTree", args[0], pos)?;
     let mut attrs = collect_attrs(ev, args[0], pos)?;
     if ev.pure() {
@@ -203,7 +251,13 @@ pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
                 .map(parse_nar_hash)
                 .transpose()
                 .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
-            let (hash, mtime) = match path_nar_hash(ev, path, exp.as_ref(), pos)? {
+            let found = if let (FetchScope::DeclaredInput, Some(expected)) = (scope, exp.as_ref()) {
+                declared_path_nar_hash(ev, path, expected, pos)?
+            } else {
+                path_nar_hash(ev, path, exp.as_ref(), pos)?
+                    .map(|(hash, mtime)| (hash, Some(mtime)))
+            };
+            let (hash, mtime) = match found {
                 Ok(found) => found,
                 Err(hash) => {
                     let exp = exp.expect("only a narHash mismatches");
@@ -226,9 +280,11 @@ pub fn fetch_tree(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wor
                 }
             };
             attrs.insert("narHash".into(), AttrVal::Str(hash.to_sri()));
-            attrs
-                .entry("lastModified".into())
-                .or_insert(AttrVal::Int(mtime.max(0) as u64));
+            if let Some(mtime) = mtime {
+                attrs
+                    .entry("lastModified".into())
+                    .or_insert(AttrVal::Int(mtime.max(0) as u64));
+            }
             let path = treestore::store_path("source", &hash)
                 .map_err(|e| Error::boxed(ErrorKind::Eval, e.to_string(), pos))?;
             Tree {

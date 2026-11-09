@@ -25,6 +25,7 @@ use crate::flake::flakeref;
 use crate::log::{self, Activity};
 use crate::progress::Mode;
 use crate::remote::event;
+use crate::remote::path_info::PathInfo;
 use crate::remote::worker::{Connection, Transport};
 use crate::session::Session;
 use crate::store::hash::{Hash, HashAlgo, HashFormat, Hasher};
@@ -150,6 +151,22 @@ struct Validity {
 }
 
 impl Validity {
+    /// Opens only a local daemon: remote validity does not authenticate local bytes.
+    /// Returns whether this call opened the connection, for batched first queries.
+    fn connect(&mut self) -> bool {
+        if self.tried {
+            return false;
+        }
+        self.tried = true;
+        let session = Session::current();
+        if let Some(t @ Transport::Unix(_)) = Transport::parse(&nix_conf(&session).store())
+            && let Ok(c) = Connection::open(&t, &mut |_| {})
+        {
+            self.conn = Some(c);
+        }
+        self.conn.is_some()
+    }
+
     /// `None` when there is no local daemon to ask. The first query also asks
     /// about `more`, which the evaluation is likely to ask about next.
     fn registered(&mut self, path: &str, more: impl FnOnce() -> Vec<String>) -> Option<bool> {
@@ -157,17 +174,8 @@ impl Validity {
             return Some(true);
         }
         let mut ask = vec![path.to_string()];
-        if !self.tried {
-            self.tried = true;
-            let session = Session::current();
-            if let Some(t @ Transport::Unix(_)) = Transport::parse(&nix_conf(&session).store())
-                && let Ok(c) = Connection::open(&t, &mut |_| {})
-            {
-                self.conn = Some(c);
-            }
-            if self.conn.is_some() {
-                ask.extend(more());
-            }
+        if self.connect() {
+            ask.extend(more());
         }
         match self.conn.as_mut()?.query_valid_paths(&ask, &mut |_| {}) {
             Ok(v) => {
@@ -253,6 +261,101 @@ fn hashes_to(path: &Path, method: IngestionMethod, hash: &Hash) -> bool {
         }
     };
     got.is_ok_and(|g| g == *hash)
+}
+
+/// Reuses an immutable, verified local snapshot of a declared locked path input.
+/// The caller must authorize the original location before reaching this lookup.
+/// Unlike `valid_in_store`, this needs the registered NAR metadata as well as
+/// validity: neither a hash-shaped directory name nor a full mutable-tree hash
+/// is a substitute for the source identity and upload size.
+pub(crate) fn path_snapshot(
+    ev: &mut Evaluator,
+    hash: &Hash,
+    pos: Pos,
+) -> EvalResult<bool> {
+    let fail = |e: String| Error::boxed(ErrorKind::Io, e, pos);
+    let sp = treestore::store_path("source", hash).map_err(|e| fail(e.to_string()))?;
+    let full = sp.to_full_string();
+    let kind = match fs::symlink_metadata(&full) {
+        Ok(m) => trace::Kind::of(&Ok(m)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => trace::Kind::Missing,
+        Err(e) => return Err(fail(format!("getting status of '{full}': {e}"))),
+    };
+    ev.trace().stat(full.as_bytes(), false, kind);
+    if kind != trace::Kind::Missing {
+        let validity = ev.store.validity.clone();
+        let mut validity = validity.lock().unwrap_or_else(PoisonError::into_inner);
+        validity.connect();
+        let info = match validity.conn.as_mut() {
+            Some(conn) => conn
+                .query_path_info(&full, &mut |_| {})
+                .map_err(|e| fail(e.to_string()))?,
+            None
+                if matches!(
+                    nix_conf(ev.session()).store().split('?').next(),
+                    Some("auto" | "daemon" | "local" | "")
+                ) || matches!(
+                    Transport::parse(&nix_conf(ev.session()).store()),
+                    Some(Transport::Unix(_))
+                ) =>
+            {
+                // A daemonless local store may still provide metadata. Never
+                // use a remote store's metadata to authenticate local bytes.
+                // This existing locator runs path-info, not fetch/evaluation.
+                let found = crate::store::locate::locate_in_store(
+                    std::slice::from_ref(&sp),
+                    &HashMap::new(),
+                )
+                .map_err(|e| fail(e.to_string()))?;
+                match found.into_iter().next().flatten() {
+                    Some(crate::store::locate::LocatedSource::Stored { info, .. }) => Some(info),
+                    _ => None,
+                }
+            }
+            None => None,
+        };
+        if let Some(info) = info {
+            check_path_snapshot(&sp, hash, &info).map_err(fail)?;
+            if !matches!(kind, trace::Kind::Directory | trace::Kind::Regular) {
+                return Err(fail(format!(
+                    "locked path snapshot '{full}' is not a file or directory"
+                )));
+            }
+            ev.known.add(
+                sp,
+                SourceOrigin::tree(SrcPath::fs(&full, None), *hash, info.nar_size),
+            );
+            return Ok(true);
+        }
+    }
+    if let Some(entry) = treestore::get(sp.base_name()) {
+        if entry.nar_hash() != *hash || entry.nar_size() == 0 {
+            return Err(fail(format!(
+                "input store snapshot '{full}' has inconsistent NAR metadata"
+            )));
+        }
+        adopt(ev, &sp, &entry);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// A path fetch produces a recursive content-addressed source without refs.
+/// Validate all of that metadata before using immutable bytes without rehashing.
+fn check_path_snapshot(sp: &StorePath, hash: &Hash, info: &PathInfo) -> Result<(), String> {
+    let nar = Hash::parse_any(&info.nar_hash, Some(HashAlgo::Sha256));
+    let ca = format!("fixed:r:sha256:{}", hash.to_nix32());
+    if info.path != *sp
+        || !nar.is_ok_and(|h| h == *hash)
+        || info.ca != ca
+        || !info.references.is_empty()
+        || info.nar_size == 0
+    {
+        return Err(format!(
+            "locked path snapshot '{sp}' has inconsistent content-addressed NAR metadata"
+        ));
+    }
+    Ok(())
 }
 
 /// fetchers.cc:getAccessorUnchecked: a locked input carries `__final`, so Nix
@@ -1000,6 +1103,43 @@ mod tests {
 
     use IngestionMethod::{Flat, Recursive};
     use trace::Kind::{Directory, Regular};
+
+    #[test]
+    fn locked_path_metadata_must_describe_the_expected_source() {
+        let hash = crate::store::hash::hash_bytes(HashAlgo::Sha256, b"source");
+        let other = crate::store::hash::hash_bytes(HashAlgo::Sha256, b"other");
+        let sp = treestore::store_path("source", &hash).unwrap();
+        let info = crate::remote::path_info::PathInfo {
+            path: sp.clone(),
+            deriver: String::new(),
+            nar_hash: hash.to_base16(),
+            references: vec![],
+            registration_time: 0,
+            nar_size: 128,
+            ultimate: false,
+            sigs: vec![],
+            ca: format!("fixed:r:sha256:{}", hash.to_nix32()),
+        };
+        assert!(check_path_snapshot(&sp, &hash, &info).is_ok());
+        let mut bad = info.clone();
+        bad.nar_hash = other.to_base16();
+        assert!(check_path_snapshot(&sp, &hash, &bad).is_err());
+        let mut bad = info.clone();
+        bad.ca = format!("fixed:r:sha256:{}", other.to_nix32());
+        assert!(check_path_snapshot(&sp, &hash, &bad).is_err());
+        let mut bad = info.clone();
+        bad.ca.clear();
+        assert!(check_path_snapshot(&sp, &hash, &bad).is_err());
+        let mut bad = info.clone();
+        bad.references.push(sp.to_full_string());
+        assert!(check_path_snapshot(&sp, &hash, &bad).is_err());
+        let mut bad = info.clone();
+        bad.path = treestore::store_path("source", &other).unwrap();
+        assert!(check_path_snapshot(&sp, &hash, &bad).is_err());
+        let mut bad = info;
+        bad.nar_size = 0;
+        assert!(check_path_snapshot(&sp, &hash, &bad).is_err());
+    }
 
     #[test]
     fn nix_literal_escapes() {

@@ -29,7 +29,7 @@ pub(crate) use local::{commit_tree, path_tree, workdir};
 pub use lock::Lock;
 pub use remote::LazyStore;
 pub(crate) use remote::{
-    ensure_readable, fetch_file, fetch_git_with_nix, store_commit, valid_in_store,
+    ensure_readable, fetch_file, fetch_git_with_nix, path_snapshot, store_commit, valid_in_store,
 };
 
 /// Options that change which files a local SCM source contains.

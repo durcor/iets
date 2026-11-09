@@ -263,6 +263,41 @@ pub fn local_source(ev: &Evaluator, path: &[u8], pos: Pos) -> EvalResult<(Vec<u8
     Ok((path, at))
 }
 
+/// Authority of call-flake's private fetchTreeFinal hook, not a public local
+/// fetch. An explicit locked filesystem input is its own whole source; a
+/// virtual input still names the selected member of its existing accessor.
+/// Authorization of the original location must precede any expected-hash hit,
+/// including when that original tree has since disappeared.
+pub(super) fn declared_path_source(
+    ev: &Evaluator,
+    path: &[u8],
+    pos: Pos,
+) -> EvalResult<(Vec<u8>, SrcPath)> {
+    let original = canon_path(path);
+    let (path, at) = located(ev, original.clone(), Follow::Full, pos)?;
+    let virtual_source = at.is_some();
+    let at = check(ev, at, &path, Follow::Full, pos)?;
+    if !virtual_source {
+        match sys::fs::canonicalize(&os(&original)) {
+            // Record even an unchanged path: a future link at this location
+            // must not let a warm result skip the original confinement check.
+            Ok(full) => ev.trace().canon(&original, Some(&full)),
+            // A cached snapshot needs no original bytes. An absent/dangling
+            // location cannot be covered by Canon(None): another dangling
+            // symlink could resolve outside the project with the same result.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => ev.trace().mark_uncacheable(),
+            Err(e) => {
+                return Err(Error::boxed(
+                    ErrorKind::Io,
+                    format!("resolving '{}': {e}", String::from_utf8_lossy(&original)),
+                    pos,
+                ));
+            }
+        }
+    }
+    Ok((path, at))
+}
+
 /// [`local_source`] for a directory that a tool opens in place, such as a
 /// repository. No copy can stand for it, so it must be a directory on disk
 /// that the root tree or the project holds.
@@ -753,6 +788,90 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::store::hash::Hash;
+
+    #[test]
+    fn declared_filesystem_source_does_not_widen_the_root_accessor() {
+        let d = tempfile::tempdir().unwrap();
+        let root = sys::fs::canonicalize(d.path()).unwrap();
+        let tracked = root.join("tracked");
+        let untracked = root.join("untracked");
+        fs::write(&tracked, b"tracked").unwrap();
+        fs::write(&untracked, b"untracked").unwrap();
+        let ev = crate::eval::EvalConfig::new()
+            .pure(true)
+            .project_root(Some(sys::path_to_internal(&root)))
+            .build();
+        let hash = Hash::from_bytes(HashAlgo::Sha256, &[0u8; 32]).unwrap();
+        let sp = treestore::store_path("source", &hash).unwrap();
+        ev.known.add(
+            sp.clone(),
+            SourceOrigin::tree(
+                SrcPath::fs(&root, Some(Arc::new(HashSet::from([tracked])))),
+                hash,
+                0,
+            ),
+        );
+        ev.known.mark_root(&sp, root);
+
+        let path = sys::path_to_internal(&untracked);
+        let (_, explicit) = declared_path_source(&ev, &path, Pos::NONE).unwrap();
+        assert_eq!(explicit.read(&ev, true).unwrap(), b"untracked");
+        let (_, ordinary) = local_source(&ev, &path, Pos::NONE).unwrap();
+        assert!(ordinary.hidden());
+
+        // An immutable virtual input retains its own filter. The explicit
+        // filesystem authority must not map it back to untracked host bytes.
+        let virtual_path = format!("{}/untracked", sp.to_full_string());
+        let (_, virtual_source) =
+            declared_path_source(&ev, virtual_path.as_bytes(), Pos::NONE).unwrap();
+        assert!(virtual_source.hidden());
+    }
+
+    #[test]
+    fn missing_declared_source_is_authorized_without_cacheable_canonicalization() {
+        let d = tempfile::tempdir().unwrap();
+        let root = sys::fs::canonicalize(d.path()).unwrap();
+        let ev = crate::eval::EvalConfig::new()
+            .pure(true)
+            .project_root(Some(sys::path_to_internal(&root)))
+            .trace(true)
+            .build();
+        let missing = sys::path_to_internal(&root.join("missing"));
+        assert!(declared_path_source(&ev, &missing, Pos::NONE).is_ok());
+        assert!(!ev.trace().is_cacheable());
+        let lookalike = format!("{}-outside/missing", root.display());
+        assert!(declared_path_source(&ev, lookalike.as_bytes(), Pos::NONE).is_err());
+    }
+
+    #[test]
+    fn declared_source_rechecks_symlinks_even_after_authorizing_the_location() {
+        let d = tempfile::tempdir().unwrap();
+        let base = sys::fs::canonicalize(d.path()).unwrap();
+        let root = base.join("root");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("inside")).unwrap();
+        fs::create_dir(base.join("outside")).unwrap();
+        let alias = root.join("alias");
+        sys::fs::symlink("inside", &alias).unwrap();
+        let ev = crate::eval::EvalConfig::new()
+            .pure(true)
+            .project_root(Some(sys::path_to_internal(&root)))
+            .trace(true)
+            .build();
+        let path = sys::path_to_internal(&alias);
+        assert!(declared_path_source(&ev, &path, Pos::NONE).is_ok());
+        assert!(ev.trace().take().iter().any(|o| matches!(
+            o,
+            Obs::Canon { path: p, target: Some(_) } if p == &path
+        )));
+        fs::remove_file(&alias).unwrap();
+        sys::fs::symlink("../outside", &alias).unwrap();
+        assert!(declared_path_source(&ev, &path, Pos::NONE).is_err());
+        fs::remove_dir(base.join("outside")).unwrap();
+        // A dangling target outside the root is forbidden too, even though
+        // both it and an authorized deleted source canonicalize to nothing.
+        assert!(declared_path_source(&ev, &path, Pos::NONE).is_err());
+    }
 
     #[test]
     fn virtual_tree_reads_go_to_the_local_files() {
