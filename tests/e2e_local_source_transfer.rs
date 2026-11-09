@@ -923,6 +923,16 @@ fn absent_worker_registration_does_not_hide_valid_actual_local_custom_outputs() 
     for source in &fixture.sources {
         assert!(!valid(&s, &source.path, Some(&empty)));
     }
-    let output = ok(s.iets().args(["build", "--builder", &target.url(), "--option", "store", &empty.url()]).arg(&consumer.drv));
+    let output = ok(s
+        .iets()
+        .args([
+            "build",
+            "--builder",
+            &target.url(),
+            "--option",
+            "store",
+            &empty.url(),
+        ])
+        .arg(&consumer.drv));
     consumer.assert_result(&s, &target, &fixture, &output);
 }
