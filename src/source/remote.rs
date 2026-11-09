@@ -279,27 +279,20 @@ pub(crate) fn path_snapshot(ev: &mut Evaluator, hash: &Hash, pos: Pos) -> EvalRe
     };
     ev.trace().stat(full.as_bytes(), false, kind);
     if kind != trace::Kind::Missing {
-        let validity = ev.store.validity.clone();
-        let mut validity = validity.lock().unwrap_or_else(PoisonError::into_inner);
-        validity.connect();
-        let info = match validity.conn.as_mut() {
-            Some(conn) => conn
-                .query_path_info(&full, &mut |_| {})
-                .map_err(|e| fail(e.to_string()))?,
-            None => {
-                // The locator binds registration metadata to the local byte
-                // namespace using this session's effective store selection.
-                let found = crate::store::locate::locate_in_store(
-                    std::slice::from_ref(&sp),
-                    &HashMap::new(),
-                    ev.session(),
-                )
-                .map_err(|e| fail(e.to_string()))?;
-                match found.into_iter().next().flatten() {
-                    Some(crate::store::locate::LocatedSource::Stored { info, .. }) => Some(info),
-                    _ => None,
-                }
-            }
+        // Worker-protocol replies describe the daemon's logical store paths,
+        // not the physical filesystem namespace read below. Even a Unix socket
+        // (including the default socket selected through the environment) may
+        // serve a relocated store. Ask the actual local registration database
+        // instead; general validity/substitution keep their separate semantics.
+        let found = crate::store::locate::locate_in_store(
+            std::slice::from_ref(&sp),
+            &HashMap::new(),
+            ev.session(),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        let info = match found.into_iter().next().flatten() {
+            Some(crate::store::locate::LocatedSource::Stored { info, .. }) => Some(info),
+            _ => None,
         };
         if let Some(info) = info {
             check_path_snapshot(&sp, hash, &info).map_err(fail)?;

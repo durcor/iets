@@ -137,6 +137,8 @@ fn valid(s: &Store, path: &Path, builder: Option<&Builder>) -> bool {
     let mut cmd = s.nix("nix-store");
     if let Some(builder) = builder {
         cmd.args(["--store", &builder.store()]);
+    } else {
+        cmd.args(["--store", "local"]);
     }
     cmd.arg("--check-validity")
         .arg(path)
@@ -151,6 +153,8 @@ fn path_info(s: &Store, path: &str, builder: Option<&Builder>) -> Value {
     cmd.arg("path-info");
     if let Some(builder) = builder {
         cmd.args(["--store", &builder.store()]);
+    } else {
+        cmd.args(["--store", "local"]);
     }
     let info = parse(&ok(cmd.args(["--json", path])));
     match info {
@@ -206,6 +210,23 @@ impl Fixture {
         let git_bin = s.dir().join("git-only");
         fs::create_dir(&git_bin).unwrap();
         symlink(e2e::resolved("git"), git_bin.join("git")).unwrap();
+        // Cache metadata is allowed, but source evaluation/fetch/build must
+        // remain native. Forward only the pinned local path-info command to
+        // real Nix; never synthesize metadata or allow delegated operations.
+        let metadata_bin = s.dir().join("metadata-only");
+        fs::create_dir(&metadata_bin).unwrap();
+        let wrapper = metadata_bin.join("nix");
+        fs::write(
+            &wrapper,
+            format!(
+                "#!{}\nif [ \"$#\" -ge 7 ] && [ \"$1\" = --store ] && [ \"$2\" = local ] && [ \"$3\" = --extra-experimental-features ] && [ \"$4\" = nix-command ] && [ \"$5\" = path-info ] && [ \"$6\" = --json ]; then\n  exec {:?} \"$@\"\nfi\nprintf '%s\\n' \"$*\" >> {:?}\nexit 97\n",
+                e2e::resolved("bash").display(),
+                e2e::resolved("nix"),
+                s.dir().join("forbidden-nix-operations"),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
         let f = Self {
             s,
             repo,
@@ -256,7 +277,7 @@ impl Fixture {
     fn native(&self) -> Command {
         let mut cmd = self.s.iets();
         cmd.env("IETS_CACHE_DIR", self.s.dir().join("native-cache"))
-            .env("IETS_NIX_BIN_DIR", self.s.no_nix())
+            .env("IETS_NIX_BIN_DIR", self.s.dir().join("metadata-only"))
             .env("PATH", self.s.dir().join("git-only"))
             .env("IETS_PROVENANCE", "0");
         cmd
@@ -272,7 +293,16 @@ impl Fixture {
         if !cached {
             cmd.args(["--no-cache", "--no-tracing-cache"]);
         }
-        cmd.arg(self.reference(attr)).output().unwrap()
+        let out = cmd.arg(self.reference(attr)).output().unwrap();
+        self.assert_metadata_only();
+        out
+    }
+
+    fn assert_metadata_only(&self) {
+        assert!(
+            !self.s.dir().join("forbidden-nix-operations").exists(),
+            "delegated a non-metadata Nix operation"
+        );
     }
 
     fn value(&self, attr: &str, cached: bool) -> Value {
@@ -309,6 +339,7 @@ impl Fixture {
         let tree = parse(&ok(self
             .s
             .nix("nix")
+            .args(["--store", "local"])
             .args(["eval", "--json", "--impure", "--expr", &expr])));
         assert_eq!(tree["source"], self.source.to_str().unwrap());
         assert!(valid(&self.s, &self.source, None));
@@ -377,6 +408,7 @@ impl Fixture {
                 "--no-tracing-cache",
             ])
             .arg(self.reference("consumer")));
+        self.assert_metadata_only();
         let output = snapshot["output"].as_str().unwrap();
         assert_eq!(stdout(&out), output);
         let mut expected = fs::read(self.s.dir().join("expected-tracked")).unwrap();
@@ -593,7 +625,7 @@ fn daemonless_snapshot_metadata_cannot_follow_ambient_store_selection() {
 
         let native = || {
             let mut cmd = f.native();
-            cmd.env("IETS_NIX_BIN_DIR", e2e::resolved("nix").parent().unwrap());
+            cmd.env("IETS_NIX_BIN_DIR", f.s.dir().join("metadata-only"));
             match setting {
                 "NIX_REMOTE" => {
                     cmd.env("NIX_REMOTE", remote.url());
@@ -654,7 +686,7 @@ fn daemonless_local_metadata_keeps_registered_bytes_and_reports_permission_error
     fs::write(f.input.join("tracked"), "changed authorized checkout\n").unwrap();
     let native = || {
         let mut cmd = f.native();
-        cmd.env("IETS_NIX_BIN_DIR", e2e::resolved("nix").parent().unwrap())
+        cmd.env("IETS_NIX_BIN_DIR", f.s.dir().join("metadata-only"))
             .args([
                 "eval",
                 "--json",
@@ -709,7 +741,7 @@ fn relocated_metadata_never_authenticates_the_logical_store_directory() {
     assert_ne!(hash_path(&f.s, &f.source), f.hash);
     let out = ok(f
         .native()
-        .env("IETS_NIX_BIN_DIR", e2e::resolved("nix").parent().unwrap())
+        .env("IETS_NIX_BIN_DIR", f.s.dir().join("metadata-only"))
         .env("NIX_REMOTE", remote.store())
         .args([
             "eval",
@@ -722,6 +754,130 @@ fn relocated_metadata_never_authenticates_the_logical_store_directory() {
         ])
         .arg(f.reference("snapshot")));
     f.assert_snapshot(&parse(&out));
+}
+
+#[test]
+fn unix_metadata_cannot_authenticate_another_filesystem_namespace_through_any_selection_route() {
+    for route in [
+        "explicit-uri",
+        "NIX_REMOTE",
+        "nix.conf",
+        "NIX_CONFIG",
+        "socket-daemon",
+        "socket-auto",
+        "socket-unix",
+        "socket-empty",
+        "state-default-socket",
+    ] {
+        let Some(f) = Fixture::new(Some(LOCK_MTIME)) else {
+            return;
+        };
+        f.save_expected();
+        let remote = f.s.builder("preferred-metadata-authority", &[]);
+        let added = stdout(&ok(f
+            .s
+            .nix("nix")
+            .args(["--store", &remote.store(), "store", "add-path", "--name", "source"])
+            .arg(&f.input)));
+        assert_eq!(added, f.source.to_str().unwrap());
+        let registered = path_info(&f.s, &added, Some(&remote));
+        assert_eq!(registered["narHash"], f.hash);
+        assert_eq!(hash_path(&f.s, &remote.real(&added)), f.hash);
+        write_input(&f.s, &f.source, true);
+        fs::write(f.source.join("tracked"), "wrong unregistered local bytes\n").unwrap();
+        assert_ne!(hash_path(&f.s, &f.source), f.hash);
+        assert!(!valid(&f.s, &f.source, None));
+        if route == "nix.conf" {
+            let conf = f.s.dir().join("conf/nix.conf");
+            let text = fs::read_to_string(&conf).unwrap();
+            fs::write(conf, format!("{text}store = {}\n", remote.url())).unwrap();
+        }
+        if route == "state-default-socket" {
+            let sockets = f.s.dir().join("var/daemon-socket");
+            fs::create_dir_all(&sockets).unwrap();
+            symlink(remote.socket(), sockets.join("socket")).unwrap();
+        }
+        let native = |cached| {
+            let mut cmd = f.native();
+            cmd.args(["eval", "--json", "--pure-eval"]);
+            if !cached {
+                cmd.args(["--no-cache", "--no-tracing-cache"]);
+            }
+            match route {
+                "explicit-uri" => { cmd.args(["--option", "store", &remote.url()]); }
+                "NIX_REMOTE" => { cmd.env("NIX_REMOTE", remote.url()); }
+                "NIX_CONFIG" => { cmd.env("NIX_CONFIG", format!("store = {}\n", remote.url())); }
+                "nix.conf" => {}
+                "state-default-socket" => { cmd.env_remove("NIX_DAEMON_SOCKET_PATH"); }
+                _ => {
+                    cmd.env("NIX_DAEMON_SOCKET_PATH", remote.socket());
+                    let selection = match route {
+                        "socket-auto" => "auto",
+                        "socket-unix" => "unix://",
+                        "socket-empty" => "",
+                        _ => "daemon",
+                    };
+                    cmd.args(["--option", "store", selection]);
+                }
+            }
+            cmd.arg(f.reference("snapshot"));
+            cmd
+        };
+        for cached in [false, true, true] {
+            let value = parse(&ok(&mut native(cached)));
+            f.assert_metadata_only();
+            f.assert_snapshot(&value);
+            if route == "explicit-uri" && !cached {
+                // Transfer the selected origin, not just its claimed hash.
+                let builder = f.assert_build(&value, "namespace-source-consumer");
+                let uploaded = path_info(&f.s, &added, Some(&builder));
+                assert_eq!(source_identity(&uploaded), source_identity(&registered));
+                let expected = ok(f.s.nix("nix-store").arg("--dump").arg(remote.real(&added))).stdout;
+                let actual = ok(f.s.nix("nix-store").arg("--dump").arg(builder.real(&added))).stdout;
+                assert_eq!(actual, expected, "selected native source NAR");
+            }
+        }
+        fs::write(f.input.join("untracked"), "authorized source changed\n").unwrap();
+        let actual = hash_path(&f.s, &f.input);
+        assert_ne!(actual, f.hash);
+        let out = native(false).output().unwrap();
+        f.assert_metadata_only();
+        assert!(!out.status.success(), "{route}: {}", stdout(&out));
+        assert!(out.stdout.is_empty());
+        assert!(stderr(&out).contains(&f.hash), "{}", stderr(&out));
+        assert!(stderr(&out).contains(&actual), "{}", stderr(&out));
+
+        // A genuinely registered local snapshot is still authoritative even
+        // when the selected Unix daemon owns another physical store.
+        write_input(&f.s, &f.input, true);
+        fs::remove_dir_all(&f.source).unwrap();
+        f.seed();
+        fs::write(f.input.join("tracked"), "changed original after local registration\n").unwrap();
+        for cached in [false, true, true] {
+            f.assert_snapshot(&parse(&ok(&mut native(cached))));
+            f.assert_metadata_only();
+        }
+    }
+}
+
+#[test]
+fn unavailable_unix_provider_does_not_prevent_authorized_native_cold_ingestion() {
+    let Some(f) = Fixture::new(Some(LOCK_MTIME)) else {
+        return;
+    };
+    f.save_expected();
+    write_input(&f.s, &f.source, true);
+    fs::write(f.source.join("tracked"), "wrong unregistered local bytes\n").unwrap();
+    for cached in [false, true, true] {
+        let mut cmd = f.native();
+        cmd.env("NIX_DAEMON_SOCKET_PATH", f.s.dir().join("absent-socket"))
+            .args(["eval", "--json", "--pure-eval"]);
+        if !cached {
+            cmd.args(["--no-cache", "--no-tracing-cache"]);
+        }
+        f.assert_snapshot(&parse(&ok(cmd.arg(f.reference("snapshot")))));
+        f.assert_metadata_only();
+    }
 }
 
 #[test]

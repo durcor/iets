@@ -99,11 +99,11 @@ fn query_references(full: &str) -> Option<BTreeSet<StorePath>> {
         .collect()
 }
 
-/// Only an unrelocated local namespace can authenticate bytes read directly
-/// below `store_dir()`. A configured root/real/store parameter may point its
-/// registration database at different physical bytes; leave those sources to
-/// the native cold path instead. Never copy arbitrary settings (or secrets)
-/// into a metadata subprocess's arguments.
+/// Whether the effective selection permits querying the actual local namespace.
+/// Unix/default-daemon selections do not prove where that daemon keeps bytes:
+/// they permit only the independently pinned `--store local` query below.
+/// Parameterized/remote selections decline metadata adoption altogether. Never
+/// copy arbitrary settings (or secrets) into the subprocess's arguments.
 fn local_metadata_store(session: &Session) -> bool {
     let cfg = session.nix_conf.get_or_init(|| {
         crate::config::Config::read(&[]).unwrap_or_else(|_| crate::config::Config::empty())
