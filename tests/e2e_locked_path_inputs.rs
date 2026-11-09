@@ -1041,12 +1041,15 @@ fn declared_symlink_roots_are_rejected_after_provider_and_general_upload_cache_p
         let permissions = fs::metadata(&database).unwrap().permissions();
         fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).unwrap();
         if general_upload {
-            let consumer = f.s.builder("symlink-consumer", &[("require-sigs", "true")]);
+            let paths = format!("/nix/store {}", f.input.display());
+            let consumer = f.s.builder(
+                "symlink-consumer",
+                &[("require-sigs", "true"), ("sandbox-paths", &paths)],
+            );
             let expression = format!(
-                "derivation {{ name = \"symlink-consumer\"; system = \"{}\"; builder = \"{}\"; args = [ \"-c\" \"{} $src > $out\" ]; src = builtins.storePath {}; }}",
+                "derivation {{ name = \"symlink-consumer\"; system = \"{}\"; builder = \"{}\"; args = [ \"-c\" \"test -L $src; while IFS= read -r line; do printf '%s\\\\n' \\\"$line\\\"; done < $src/tracked > $out\" ]; src = builtins.storePath {}; }}",
                 e2e::system(),
                 e2e::resolved("bash").display(),
-                e2e::resolved("readlink").display(),
                 serde_json::to_string(&added).unwrap()
             );
             let output = stdout(&ok(f.native().env("IETS_NIX_BIN_DIR", f.s.no_nix()).args(
@@ -1064,7 +1067,7 @@ fn declared_symlink_roots_are_rejected_after_provider_and_general_upload_cache_p
             )));
             assert_eq!(
                 fs::read_to_string(consumer.real(output.trim())).unwrap(),
-                format!("{}\n", f.input.display())
+                fs::read_to_string(f.input.join("tracked")).unwrap()
             );
             let copied = path_info(&f.s, &added, Some(&consumer));
             assert_eq!(source_identity(&copied), source_identity(&registered));
