@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use crate::error::{self, Error as CrateError};
-use crate::nixbin;
 use crate::fetch::spool;
+use crate::nixbin;
 use crate::remote::path_info::PathInfo;
 use crate::remote::worker::{Connection, Transport};
 use crate::session::Session;
@@ -150,7 +150,14 @@ pub(crate) fn local_path_info(
     let ask: Vec<String> = paths.iter().map(StorePath::to_string).collect();
     let out = Command::new(nixbin::nix())
         // Explicit selection outranks ambient configuration and NIX_REMOTE.
-        .args(["--store", "local", "--extra-experimental-features", "nix-command", "path-info", "--json"])
+        .args([
+            "--store",
+            "local",
+            "--extra-experimental-features",
+            "nix-command",
+            "path-info",
+            "--json",
+        ])
         .args(&ask)
         .stderr(Stdio::inherit())
         .output()
@@ -162,10 +169,19 @@ pub(crate) fn local_path_info(
     if !out.status.success() && !unavailable {
         return Err(CrateError::Protocol("nix path-info failed".into()));
     }
-    paths.iter().map(|p| {
-        let v = info.get(&p.to_string()).ok_or_else(|| CrateError::Protocol(format!("nix path-info omitted '{p}'")))?;
-        if v.is_null() { Ok(None) } else { PathInfo::from_json(p.clone(), v).map(Some) }
-    }).collect()
+    paths
+        .iter()
+        .map(|p| {
+            let v = info
+                .get(&p.to_string())
+                .ok_or_else(|| CrateError::Protocol(format!("nix path-info omitted '{p}'")))?;
+            if v.is_null() {
+                Ok(None)
+            } else {
+                PathInfo::from_json(p.clone(), v).map(Some)
+            }
+        })
+        .collect()
 }
 
 /// Retain provider bytes once in the existing verified content cache. The cache
@@ -177,34 +193,57 @@ pub(crate) fn cache_nar(
 ) -> error::Result<(StorePath, Arc<StoredTree>)> {
     let hash = Hash::parse_any(&info.nar_hash, Some(HashAlgo::Sha256))?;
     if info.nar_size == 0 {
-        return Err(CrateError::Protocol(format!("'{}' has an empty registered NAR", info.path)));
+        return Err(CrateError::Protocol(format!(
+            "'{}' has an empty registered NAR",
+            info.path
+        )));
     }
     let key = treestore::store_path("source", &hash)?;
     let _fetching = treestore::fetch_lock(key.base_name(), || {});
     let entry = if let Some(entry) = treestore::reopen(key.base_name()) {
         entry
     } else {
-        let staged = treestore::stage(key.base_name())
-            .ok_or_else(|| CrateError::Protocol("iets has no cache directory to hold provider bytes".into()))?;
-        let mut file = spool::spool_file(staged.dir()).map_err(|e| CrateError::io("staging provider NAR", e))?;
+        let staged = treestore::stage(key.base_name()).ok_or_else(|| {
+            CrateError::Protocol("iets has no cache directory to hold provider bytes".into())
+        })?;
+        let mut file = spool::spool_file(staged.dir())
+            .map_err(|e| CrateError::io("staging provider NAR", e))?;
         let mut root = None;
         conn.nar_from_path(&info.path.to_string(), &mut |_| {}, &mut |r| {
             let (node, size) = spool::index_nar(&mut r.take(info.nar_size), &mut file)?;
             if size != info.nar_size {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("'{}' NAR size mismatch: expected {}, got {size}", info.path, info.nar_size)));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "'{}' NAR size mismatch: expected {}, got {size}",
+                        info.path, info.nar_size
+                    ),
+                ));
             }
             root = Some(node);
             Ok(())
         })?;
         let tree = spool::Tree::spooled(file, root.expect("successful NAR callback"));
-        treestore::put("source", IngestionMethod::Recursive, &hash, staged, tree).map_err(|e| match e {
-            Rejected::Mismatch(actual) => CrateError::Protocol(format!("NAR hash mismatch for '{}': expected '{}', got '{}'", info.path, hash.to_sri(), actual.to_sri())),
-            Rejected::Io(e) => CrateError::io("keeping provider NAR", e),
-            Rejected::Unstorable => CrateError::Protocol("iets cannot keep provider bytes in the input store".into()),
+        treestore::put("source", IngestionMethod::Recursive, &hash, staged, tree).map_err(|e| {
+            match e {
+                Rejected::Mismatch(actual) => CrateError::Protocol(format!(
+                    "NAR hash mismatch for '{}': expected '{}', got '{}'",
+                    info.path,
+                    hash.to_sri(),
+                    actual.to_sri()
+                )),
+                Rejected::Io(e) => CrateError::io("keeping provider NAR", e),
+                Rejected::Unstorable => CrateError::Protocol(
+                    "iets cannot keep provider bytes in the input store".into(),
+                ),
+            }
         })?
     };
     if entry.nar_hash() != hash || entry.nar_size() != info.nar_size {
-        return Err(CrateError::Protocol(format!("'{}' has inconsistent canonical NAR metadata", info.path)));
+        return Err(CrateError::Protocol(format!(
+            "'{}' has inconsistent canonical NAR metadata",
+            info.path
+        )));
     }
     Ok((key, entry))
 }
@@ -220,12 +259,19 @@ pub fn locate_in_store(
     let cfg = session.nix_conf.get_or_init(|| {
         crate::config::Config::read(&[]).unwrap_or_else(|_| crate::config::Config::empty())
     });
-    let unknown: Vec<StorePath> = paths.iter().filter(|p| !overrides.contains_key(&p.to_string())).cloned().collect();
+    let unknown: Vec<StorePath> = paths
+        .iter()
+        .filter(|p| !overrides.contains_key(&p.to_string()))
+        .cloned()
+        .collect();
     let mut found = HashMap::new();
     if !unknown.is_empty() {
         let transport = Transport::parse(&cfg.store());
-        let opened = transport.as_ref().filter(|t| !matches!(t, Transport::Grpc(_)))
-            .map(|t| Connection::open(t, &mut |_| {})).transpose();
+        let opened = transport
+            .as_ref()
+            .filter(|t| !matches!(t, Transport::Grpc(_)))
+            .map(|t| Connection::open(t, &mut |_| {}))
+            .transpose();
         match opened {
             Ok(Some(mut conn)) => {
                 for p in &unknown {
@@ -233,21 +279,34 @@ pub fn locate_in_store(
                         None => None,
                         Some(info) => {
                             if info.path != *p {
-                                return Err(CrateError::Protocol(format!("provider returned '{}' for '{p}'", info.path)));
+                                return Err(CrateError::Protocol(format!(
+                                    "provider returned '{}' for '{p}'",
+                                    info.path
+                                )));
                             }
                             let (key, _) = cache_nar(&mut conn, &info)?;
-                            Some(LocatedSource::Stored { at: SrcPath::spool(key.base_name(), b""), info })
+                            Some(LocatedSource::Stored {
+                                at: SrcPath::spool(key.base_name(), b""),
+                                info,
+                            })
                         }
                     };
                     found.insert(p.clone(), located);
                 }
             }
             opened => {
-                if local_metadata_store(session) && local_metadata_available().map_err(|e| CrateError::io("opening local registration metadata", e))? {
+                if local_metadata_store(session)
+                    && local_metadata_available()
+                        .map_err(|e| CrateError::io("opening local registration metadata", e))?
+                {
                     for (p, info) in unknown.iter().zip(local_path_info(&unknown, session)?) {
-                        found.insert(p.clone(), info.map(|info| LocatedSource::Stored {
-                            at: SrcPath::fs(format!("{}/{}", store_dir(), p.base_name()), None), info,
-                        }));
+                        found.insert(
+                            p.clone(),
+                            info.map(|info| LocatedSource::Stored {
+                                at: SrcPath::fs(format!("{}/{}", store_dir(), p.base_name()), None),
+                                info,
+                            }),
+                        );
                     }
                 } else if let Err(e) = opened {
                     return Err(e);
@@ -255,11 +314,18 @@ pub fn locate_in_store(
             }
         }
     }
-    Ok(paths.iter().map(|p| {
-        if let Some(local) = overrides.get(&p.to_string()) {
-            Some(LocatedSource::Source(SourceOrigin { at: SrcPath::fs(local.clone(), None), kind: SourceKind::Source, nar: None }))
-        } else {
-            found.get(p).cloned().flatten()
-        }
-    }).collect())
+    Ok(paths
+        .iter()
+        .map(|p| {
+            if let Some(local) = overrides.get(&p.to_string()) {
+                Some(LocatedSource::Source(SourceOrigin {
+                    at: SrcPath::fs(local.clone(), None),
+                    kind: SourceKind::Source,
+                    nar: None,
+                }))
+            } else {
+                found.get(p).cloned().flatten()
+            }
+        })
+        .collect())
 }

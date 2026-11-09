@@ -316,7 +316,6 @@ pub(crate) fn path_snapshot(ev: &mut Evaluator, hash: &Hash, pos: Pos) -> EvalRe
     Ok(false)
 }
 
-
 /// A worker's metadata can name only its own bytes, never an unchecked local
 /// logical path. Populate the private immutable input store once from the same
 /// connection's NAR; subsequent evaluations need neither provider nor rehash.
@@ -353,9 +352,14 @@ fn provider_path_snapshot(
         }
     };
     if key != *sp
-        || !matches!(entry.stat(b"", false), Some(nar::FileType::Directory | nar::FileType::Regular))
+        || !matches!(
+            entry.stat(b"", false),
+            Some(nar::FileType::Directory | nar::FileType::Regular)
+        )
     {
-        return Err(fail(format!("locked path snapshot '{sp}' is not a file or directory")));
+        return Err(fail(format!(
+            "locked path snapshot '{sp}' is not a file or directory"
+        )));
     }
     adopt(ev, sp, &entry);
     Ok(true)
