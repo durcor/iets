@@ -231,6 +231,48 @@ fn lookup<'a>(root: &'a DraftDir, parts: &[Vec<u8>]) -> Option<&'a Draft> {
     at.get(last)
 }
 
+/// Indexes a canonical NAR into a payload spool, not a restored filesystem tree.
+/// The caller bounds the stream by its registered size and verifies the tree
+/// with `treestore::put` before publishing or adopting any source origin.
+pub(crate) fn index_nar(source: &mut dyn Read, spool: &mut File) -> io::Result<(Node, u64)> {
+    let mut reader = crate::store::nar::Reader::open_nar(source)?;
+    let root = index_nar_node(&mut reader, spool, &mut 0, 0)?;
+    Ok((root, reader.size()))
+}
+
+fn index_nar_node(
+    reader: &mut crate::store::nar::Reader<'_>,
+    spool: &mut File,
+    offset: &mut u64,
+    depth: usize,
+) -> io::Result<Node> {
+    use crate::store::nar::ParsedNode;
+    if depth >= NAR_MAX_DEPTH {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "NAR directory nesting too deep"));
+    }
+    let node = match reader.next_node()? {
+        ParsedNode::Regular { size, executable } => {
+            let at = Blob::Spool { offset: *offset, size, sparse: false };
+            *offset = offset.checked_add(size).ok_or_else(||
+                io::Error::new(io::ErrorKind::InvalidData, "NAR contents too large"))?;
+            reader.contents_to(spool, size)?;
+            Node::File { at, exec: executable }
+        }
+        ParsedNode::Symlink(target) => Node::Symlink(target),
+        ParsedNode::Directory => {
+            let mut entries = Vec::new();
+            let mut prev = Vec::new();
+            while let Some(name) = reader.next_entry(&mut prev)? {
+                entries.push((name, index_nar_node(reader, spool, offset, depth + 1)?));
+                reader.end_node()?;
+            }
+            return Ok(Node::Dir(entries));
+        }
+    };
+    reader.end_node()?;
+    Ok(node)
+}
+
 impl Tree {
     /// Indexes the decompressed tar in `spool`, which is read from the start and
     /// kept for `dump`. `max_size` is `fetch-max-size`: the spool and everything
@@ -1290,6 +1332,41 @@ pub(crate) mod tests {
         let mut spool = scratch().unwrap();
         spool.write_all(&plain).unwrap();
         Tree::index(spool, u64::MAX).unwrap()
+    }
+
+    #[test]
+    fn native_nar_spool_keeps_exact_bytes_and_rejects_bad_framing() {
+        let long = vec![b'z'; (1 << 20) + 37];
+        let tree = spooled(&[
+            ("t/", DIR, 0o755, b""),
+            ("t/a", REG, 0o644, b"same"),
+            ("t/empty", REG, 0o644, b""),
+            ("t/link", SYM, 0o777, b"sub/run"),
+            ("t/sub/", DIR, 0o755, b""),
+            ("t/sub/run", REG, 0o755, &long),
+        ]);
+        let mut expected = Vec::new();
+        tree.dump(&mut expected).unwrap();
+        let mut file = scratch().unwrap();
+        let (root, size) = index_nar(&mut expected.as_slice(), &mut file).unwrap();
+        assert_eq!(size, expected.len() as u64);
+        let back = Tree::spooled(file, root);
+        let mut got = Vec::new();
+        back.dump(&mut got).unwrap();
+        assert_eq!(got, expected);
+        let dir = tempdir().unwrap();
+        let (packed, _) = stored(dir.path(), &back);
+        got.clear();
+        packed.dump(&mut got).unwrap();
+        assert_eq!(got, expected);
+        let mut invalid_name = expected.clone();
+        let at = invalid_name.windows(5).position(|w| w == b"empty").unwrap();
+        invalid_name[at] = b'/';
+        let mut invalid_padding = expected.clone();
+        *invalid_padding.last_mut().unwrap() = 1;
+        for bytes in [&expected[..expected.len() - 1], &invalid_name, &invalid_padding] {
+            assert!(index_nar(&mut &bytes[..], &mut scratch().unwrap()).is_err());
+        }
     }
 
     /// A stored tree is the tree that was fetched: the same NAR, member for

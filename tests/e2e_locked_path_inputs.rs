@@ -902,6 +902,87 @@ fn unavailable_unix_provider_does_not_prevent_authorized_native_cold_ingestion()
 }
 
 #[test]
+fn a_read_only_local_database_uses_verified_native_provider_bytes_then_its_own_cache() {
+    for selection in ["explicit-uri", "daemon", "auto", "unix://", ""] {
+        let Some(f) = Fixture::new(Some(LOCK_MTIME)) else {
+            return;
+        };
+        f.save_expected();
+        let remote = f.s.builder("native-snapshot-provider", &[]);
+        let added = stdout(&ok(f.s.nix("nix")
+            .args(["--store", &remote.store(), "store", "add-path", "--name", "source"])
+            .arg(&f.input)));
+        let registered = path_info(&f.s, &added, Some(&remote));
+        assert_eq!(registered["narHash"], f.hash);
+        write_input(&f.s, &f.source, true);
+        fs::write(f.source.join("tracked"), "wrong unregistered local bytes\n").unwrap();
+        assert_ne!(hash_path(&f.s, &f.source), f.hash);
+        assert!(!valid(&f.s, &f.source, None));
+        fs::write(f.input.join("tracked"), "changed authorized original\n").unwrap();
+        let database = f.s.dir().join("var/db/db.sqlite");
+        let permissions = fs::metadata(&database).unwrap().permissions();
+        fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).unwrap();
+        let uri = remote.url();
+        let socket = remote.socket();
+        let native = |cached: bool| {
+            let mut cmd = f.native();
+            cmd.env("IETS_NIX_BIN_DIR", f.s.no_nix())
+                .env("NIX_DAEMON_SOCKET_PATH", &socket)
+                .args(["eval", "--json", "--pure-eval", "--option", "store",
+                    if selection == "explicit-uri" { &uri } else { selection }]);
+            if !cached {
+                cmd.args(["--no-cache", "--no-tracing-cache"]);
+            }
+            cmd.arg(f.reference("snapshot"));
+            cmd
+        };
+        let initial = parse(&ok(&mut native(false)));
+        f.assert_snapshot(&initial);
+        // The byte provider can disappear; the verified private input store
+        // remains authoritative, with no Nix metadata/fetch/evaluation binary.
+        drop(remote);
+        for cached in [true, true, false] {
+            assert_eq!(parse(&ok(&mut native(cached))), initial);
+        }
+        fs::set_permissions(&database, permissions).unwrap();
+        let builder = f.assert_build(&initial, "verified-provider-consumer");
+        let uploaded = path_info(&f.s, &added, Some(&builder));
+        assert_eq!(source_identity(&uploaded), source_identity(&registered));
+    }
+}
+
+#[test]
+fn native_provider_metadata_does_not_authenticate_changed_provider_bytes() {
+    let Some(f) = Fixture::new(Some(LOCK_MTIME)) else {
+        return;
+    };
+    let remote = f.s.builder("changed-snapshot-provider", &[]);
+    let added = stdout(&ok(f.s.nix("nix")
+        .args(["--store", &remote.store(), "store", "add-path", "--name", "source"])
+        .arg(&f.input)));
+    let tracked = remote.real(&added).join("tracked");
+    let mut changed = fs::read(&tracked).unwrap();
+    changed.fill(b'x');
+    fs::set_permissions(&tracked, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(&tracked, changed).unwrap();
+    let actual = hash_path(&f.s, &remote.real(&added));
+    assert_ne!(actual, f.hash);
+    assert_eq!(path_info(&f.s, &added, Some(&remote))["narHash"], f.hash);
+    write_input(&f.s, &f.source, true);
+    let database = f.s.dir().join("var/db/db.sqlite");
+    let permissions = fs::metadata(&database).unwrap().permissions();
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).unwrap();
+    let out = f.native().env("IETS_NIX_BIN_DIR", f.s.no_nix())
+        .args(["eval", "--json", "--pure-eval", "--no-cache", "--option", "store", &remote.url()])
+        .arg(f.reference("snapshot")).output().unwrap();
+    fs::set_permissions(&database, permissions).unwrap();
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(out.stdout.is_empty());
+    assert!(stderr(&out).contains(&f.hash), "{}", stderr(&out));
+    assert!(stderr(&out).contains(&actual), "{}", stderr(&out));
+}
+
+#[test]
 fn seeded_cache_does_not_authorize_outside_prefix_or_symlink_escape_inputs() {
     let Some(f) = Fixture::new(Some(LOCK_MTIME)) else {
         return;

@@ -493,6 +493,13 @@ fn bad_nar(why: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("bad NAR: {why}"))
 }
 
+/// The header of one validated NAR node. Payload bytes remain in the reader.
+pub(crate) enum ParsedNode {
+    Regular { size: u64, executable: bool },
+    Symlink(Vec<u8>),
+    Directory,
+}
+
 /// A NAR stream read through one refillable window.
 ///
 /// The shape is the one nix-community/go-nix PR #123 (pkg/narv2) settled on: a
@@ -500,7 +507,7 @@ fn bad_nar(why: &str) -> io::Error {
 /// token groups matched with one compare against a pre-framed constant, the node
 /// shape picked from a single byte of a peeked header, contents streamed by their
 /// declared length, and nothing allocated per token.
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     src: &'a mut dyn Read,
     buf: Box<[u8]>,
     /// The filled region of `buf`.
@@ -522,6 +529,59 @@ impl<'a> Reader<'a> {
             consumed: 0,
         }
     }
+    pub(crate) fn open_nar(src: &'a mut dyn Read) -> io::Result<Self> {
+        let mut r = Self::new(src);
+        r.consume(&TOK_NAR, "a NAR header")?;
+        Ok(r)
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.consumed
+    }
+
+    pub(crate) fn next_node(&mut self) -> io::Result<ParsedNode> {
+        match self.node_tag()? {
+            tag @ (TAG_REG | TAG_EXE) => {
+                if tag == TAG_EXE {
+                    self.consume(&TOK_EXE, "'regular' 'executable' 'contents'")?;
+                } else {
+                    self.consume(&TOK_REG, "'regular' 'contents'")?;
+                }
+                Ok(ParsedNode::Regular { size: self.u64()?, executable: tag == TAG_EXE })
+            }
+            TAG_SYM => {
+                self.consume(&TOK_SYM, "'symlink' 'target'")?;
+                let target = self.token(MAX_TARGET)?.to_vec();
+                check_target(&target)?;
+                Ok(ParsedNode::Symlink(target))
+            }
+            _ => {
+                self.consume(&TOK_DIR, "'directory'")?;
+                Ok(ParsedNode::Directory)
+            }
+        }
+    }
+
+    pub(crate) fn next_entry(&mut self, prev: &mut Vec<u8>) -> io::Result<Option<Vec<u8>>> {
+        match self.peek(16)?[0] {
+            1 => {
+                self.end_node()?;
+                return Ok(None);
+            }
+            5 => {}
+            _ => return Err(bad_nar("expected 'entry' or ')'")),
+        }
+        self.consume(&TOK_ENT, "'entry' '(' 'name'")?;
+        let name = self.token(MAX_NAME)?.to_vec();
+        next_name(&name, prev)?;
+        self.consume(&TOK_NOD, "'node' '(' 'type'")?;
+        Ok(Some(name))
+    }
+
+    pub(crate) fn end_node(&mut self) -> io::Result<()> {
+        self.consume(&TOK_PAR, "')'")
+    }
+
 
     /// Reads more of the source, sliding what is left of the window to the front.
     fn refill(&mut self) -> io::Result<()> {
@@ -657,7 +717,7 @@ impl<'a> Reader<'a> {
     }
 
     /// Copies `len` bytes of contents into `out`, then the padding.
-    fn contents_to(&mut self, out: &mut fs::File, len: u64) -> io::Result<()> {
+    pub(crate) fn contents_to(&mut self, out: &mut fs::File, len: u64) -> io::Result<()> {
         let mut left = len;
         while left > 0 {
             let chunk = self.some(left.min(BUF as u64) as usize)?;
@@ -785,6 +845,7 @@ pub fn parse_length(source: &mut dyn Read) -> io::Result<u64> {
     parse_node(&mut r, &mut name, &mut Vec::new(), 0)?;
     Ok(r.consumed)
 }
+
 
 /// `prev[d]` is the last entry name read at depth `d`.
 fn parse_node(
