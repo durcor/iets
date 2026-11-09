@@ -1036,6 +1036,7 @@ fn declared_symlink_roots_are_rejected_after_provider_and_general_upload_cache_p
         lock["nodes"]["dep"]["flake"] = false.into();
         fs::write(f.repo.join("flake.lock"), lock.to_string()).unwrap();
         git(&f.repo, &["add", "flake.nix", "flake.lock"]);
+        ok(f.s.nix("nix-store").args(["--store", "local", "--init"]));
         let database = f.s.dir().join("var/db/db.sqlite");
         let permissions = fs::metadata(&database).unwrap().permissions();
         fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).unwrap();
