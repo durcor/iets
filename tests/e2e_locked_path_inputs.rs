@@ -1029,7 +1029,7 @@ fn declared_symlink_roots_are_rejected_after_provider_and_general_upload_cache_p
         // symlink root, nor may following the link make its target eligible.
         fs::create_dir(&f.source).unwrap();
         f.s.write(f.repo.join("flake.nix").to_str().unwrap(),
-            &format!("{{ inputs.dep = {{ url = \"path:{}\"; flake = false; }}; outputs = {{self,dep}}: {{ selected = dep.outPath; }}; }}", f.input.display()));
+            &format!("{{ inputs.dep = {{ url = \"path:{}\"; flake = false; }}; outputs = {{self,dep,...}}: {{ selected = dep.outPath; }}; }}", f.input.display()));
         let mut lock: Value =
             serde_json::from_slice(&fs::read(f.repo.join("flake.lock")).unwrap()).unwrap();
         lock["nodes"]["dep"]["locked"]["narHash"] = f.hash.clone().into();
