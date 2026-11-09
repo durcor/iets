@@ -1074,10 +1074,7 @@ fn declared_symlink_roots_are_rejected_after_provider_and_general_upload_cache_p
             assert_eq!(copied["signatures"], registered["signatures"]);
             assert_eq!(fs::read_link(consumer.real(&added)).unwrap(), f.input);
             assert_eq!(
-                ok(f.s
-                    .nix("nix-store")
-                    .args(["--store", &remote.store(), "--dump", &added]))
-                .stdout,
+                ok(f.s.nix("nix-store").arg("--dump").arg(remote.real(&added))).stdout,
                 ok(f.s
                     .nix("nix-store")
                     .args(["--dump"])
