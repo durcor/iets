@@ -81,6 +81,19 @@ already-authorized trusted connection. An unsigned local output does not
 become content-addressed merely because it is an input source; iets does
 not change the destination's trust policy.
 
+Registered sources without an evaluator-recorded origin work on ordinary
+multi-user stores too, including stored `.drv` builds and streamed `eval-jobs`.
+The selected native worker supplies metadata and NAR bytes on the same
+connection. iets verifies the canonical NAR hash and size into its private
+input cache, then uploads from that replayable accessor. A content-addressed
+cache key describes the bytes only: the upload keeps the original IA or CA
+path, references, deriver and signatures, and clears `ultimate`. Destination
+closure members already present are not fetched or copied. A direct local
+metadata query is used with filesystem bytes only when that actual-local
+provider is usable; root database write access is not needed for worker-backed
+copies. Neither a different daemon namespace nor a socket alias authenticates
+unchecked logical filesystem bytes.
+
 ## Flake checks
 
 Name the whole set. `iets build` builds every derivation in

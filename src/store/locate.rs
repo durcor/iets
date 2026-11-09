@@ -293,6 +293,21 @@ pub fn locate_in_store(
                     };
                     found.insert(p.clone(), located);
                 }
+                // A reachable worker may use another namespace. Its absence
+                // does not invalidate a genuinely registered actual-local
+                // custom output; only that local registration can bind its FS.
+                let absent: Vec<_> = unknown.iter()
+                    .filter(|p| found.get(*p).is_some_and(Option::is_none))
+                    .cloned().collect();
+                if !absent.is_empty() && local_metadata_store(session)
+                    && local_metadata_available().map_err(|e| CrateError::io("opening local registration metadata", e))?
+                {
+                    for (p, info) in absent.iter().zip(local_path_info(&absent, session)?) {
+                        found.insert(p.clone(), info.map(|info| LocatedSource::Stored {
+                            at: SrcPath::fs(format!("{}/{}", store_dir(), p.base_name()), None), info,
+                        }));
+                    }
+                }
             }
             opened => {
                 if local_metadata_store(session)

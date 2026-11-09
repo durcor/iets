@@ -912,3 +912,17 @@ fn unknown_ia_metadata_cannot_authenticate_corrupt_provider_bytes() {
     assert!(fs::OpenOptions::new().write(true).open(&database).is_err());
     fs::set_permissions(database, fs::Permissions::from_mode(0o644)).unwrap();
 }
+
+#[test]
+fn absent_worker_registration_does_not_hide_valid_actual_local_custom_outputs() {
+    let s = store!(("keep-derivations", "false"));
+    let fixture = Fixture::new(&s, true);
+    let consumer = fixture.consumer(&s, "actual-local-custom-consumer");
+    let empty = s.builder("empty-source-namespace", &[]);
+    let target = s.builder("actual-local-target", &[]);
+    for source in &fixture.sources {
+        assert!(!valid(&s, &source.path, Some(&empty)));
+    }
+    let output = ok(s.iets().args(["build", "--builder", &target.url(), "--option", "store", &empty.url()]).arg(&consumer.drv));
+    consumer.assert_result(&s, &target, &fixture, &output);
+}
