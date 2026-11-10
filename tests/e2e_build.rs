@@ -303,6 +303,13 @@ fn configured_and_explicit_limits_reach_the_builder() {
         ("spaced", vec!["-j", "1", "--cores", "1"], 1),
         ("compact", vec!["-j1", "--cores", "2"], 2),
         ("long", vec!["--max-jobs", "1", "--cores", "3"], 3),
+        ("--json", vec!["-j1", "--cores", "1"], 1),
+        ("--no-build", vec!["-j1", "--cores", "1"], 1),
+        (
+            "interleaved",
+            vec!["--option", "build-cores", "4", "--timings", "--cores", "1"],
+            1,
+        ),
         (
             "flag-last",
             vec!["--option", "build-cores", "4", "--cores", "1"],

@@ -152,6 +152,116 @@ fn build_limits_fail_before_evaluation_or_connection(bin: Iets) {
 }
 
 #[rstest]
+#[case::short_jobs("-j")]
+#[case::long_jobs("--max-jobs")]
+#[case::cores("--cores")]
+fn build_resource_operands_keep_their_original_neighbors(bin: Iets, #[case] flag: &str) {
+    for switch in [
+        "--json",
+        "--timings",
+        "--dry-run",
+        "--no-build",
+        "-k",
+        "--keep-going",
+    ] {
+        let o = bin
+            .cmd()
+            .args([
+                "build",
+                "--builder",
+                "unix:///nonexistent/adjacency.socket",
+                flag,
+                switch,
+                "1",
+            ])
+            .args(["-E", "throw \"evaluated-before-validation\""])
+            .output()
+            .unwrap();
+        let err = stderr(&o);
+        assert!(!o.status.success(), "{flag} {switch}: {err}");
+        assert!(
+            !err.contains("evaluated-before-validation"),
+            "{flag} {switch}: {err}"
+        );
+        assert!(o.stdout.is_empty(), "{flag} {switch}: {}", stdout(&o));
+    }
+}
+
+#[rstest]
+#[case::jobs("max-jobs")]
+#[case::job_alias("build-max-jobs")]
+#[case::cores("cores")]
+#[case::core_alias("build-cores")]
+fn build_resource_option_operands_keep_their_original_neighbors(bin: Iets, #[case] name: &str) {
+    for switch in ["--json", "--timings", "--dry-run", "--no-build", "-k"] {
+        let o = bin
+            .cmd()
+            .args(["build", "--builder", "unix:///nonexistent/adjacency.socket"])
+            .args(["--option", name, switch, "1", "--option", name, "1"])
+            .args(["-E", "throw \"evaluated-before-validation\""])
+            .output()
+            .unwrap();
+        let err = stderr(&o);
+        assert!(!o.status.success(), "{name} {switch}: {err}");
+        assert!(
+            !err.contains("evaluated-before-validation"),
+            "{name} {switch}: {err}"
+        );
+        assert!(o.stdout.is_empty(), "{name} {switch}: {}", stdout(&o));
+    }
+}
+
+#[rstest]
+fn build_data_operands_that_look_like_flags_are_not_reparsed(bin: Iets) {
+    for value in [
+        "--json",
+        "--timings",
+        "--dry-run",
+        "--no-build",
+        "-k",
+        "-j1",
+        "--cores",
+        "--option",
+    ] {
+        let o = bin
+            .cmd()
+            .args(["build", "--builder", "unix:///nonexistent/adjacency.socket"])
+            .args([
+                "--argstr",
+                "value",
+                value,
+                "-E",
+                "{ value }: throw (\"operand:\" + value)",
+            ])
+            .output()
+            .unwrap();
+        let err = stderr(&o);
+        assert_eq!(o.status.code(), Some(1), "{value}: {err}");
+        assert!(err.contains(&format!("operand:{value}")), "{value}: {err}");
+        assert!(o.stdout.is_empty());
+    }
+    for value in ["--cores", "-j1", "--json"] {
+        let o = bin
+            .cmd()
+            .args(["build", "--builder", "unix:///nonexistent/adjacency.socket"])
+            .args([
+                "--out",
+                value,
+                "-E",
+                "throw \"build-option-operand-preserved\"",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(1), "{value}: {}", stderr(&o));
+        assert!(
+            stderr(&o).contains("build-option-operand-preserved"),
+            "{value}: {}",
+            stderr(&o)
+        );
+    }
+}
+
+#[rstest]
 #[case::grpc("grpc://127.0.0.1:1", "max-builds")]
 #[case::ssh("ssh-ng://resource-limits.invalid", "remote service")]
 fn unsupported_transports_reject_explicit_build_limits(

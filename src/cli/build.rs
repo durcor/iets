@@ -14,7 +14,7 @@ use crate::api::render::{Outcomes, Report};
 use crate::build::fixhash::{self, Answer};
 use crate::build::render::Style;
 use crate::build::{Outcome, Target};
-use crate::cli::help::{arg_error, each_arg};
+use crate::cli::help::arg_error;
 use crate::cli::render::{self, text};
 use crate::cli::{
     self, EvalArgs, Input, Run, build_targets, devenv, parse_build_eval_args, report, run_for,
@@ -117,27 +117,28 @@ fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
         sources: HashMap::new(),
         root_key: Vec::new(),
     };
-    let mut rest: Vec<String> = Vec::new();
-    each_arg(argv, |s, next| match s {
-        "--builder" => b.url = Some(next()),
-        "--timings" => b.timings = true,
-        "--no-build" => b.no_build = true,
-        "--dry-run" => b.dry_run = true,
-        "--json" => b.json = true,
-        "-k" | "--keep-going" => b.keep_going = true,
-        "--fetch-to" => b.fetch_to = Some(next().into()),
-        "-o" | "--out-link" => b.out_link = Some(next()),
-        "--out" => b.outputs.push(next()),
-        "--source" => {
-            let spec = next();
-            let Some((store, local)) = spec.split_once('=') else {
-                arg_error(format!("--source wants STOREPATH=LOCAL, got '{spec}'"))
-            };
-            b.sources.insert(store.to_string(), local.into());
+    let (a, explicit_limits) = parse_build_eval_args(argv, |s, next| {
+        match s {
+            "--builder" => b.url = Some(next()),
+            "--timings" => b.timings = true,
+            "--no-build" => b.no_build = true,
+            "--dry-run" => b.dry_run = true,
+            "--json" => b.json = true,
+            "-k" | "--keep-going" => b.keep_going = true,
+            "--fetch-to" => b.fetch_to = Some(next().into()),
+            "-o" | "--out-link" => b.out_link = Some(next()),
+            "--out" => b.outputs.push(next()),
+            "--source" => {
+                let spec = next();
+                let Some((store, local)) = spec.split_once('=') else {
+                    arg_error(format!("--source wants STOREPATH=LOCAL, got '{spec}'"))
+                };
+                b.sources.insert(store.to_string(), local.into());
+            }
+            _ => return false,
         }
-        s => rest.push(s.to_string()),
+        true
     });
-    let (a, explicit_limits) = parse_build_eval_args(&rest);
     b.explicit_limits = explicit_limits;
     b.root_key = root_key(&installables(&a));
     (b, a)
