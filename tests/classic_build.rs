@@ -54,6 +54,77 @@ fn rooted(s: &Store, path: &str, link: &Path) -> bool {
 }
 
 #[test]
+fn compact_max_jobs_build_limits_and_last_setting_win() {
+    let s = store!();
+    let f = Farm::new(&s);
+    // Each case has a fresh derivation: a previous successful build must not
+    // hide a zero-job limit. All builders use only this fixture's daemon.
+    for (index, (name, flags, allowed)) in [
+        ("nix-build", vec!["-j0"], false),
+        ("nix-build", vec!["-j0", "-j", "1"], true),
+        ("nix-build", vec!["--max-jobs", "1", "-j0"], false),
+        ("nix-build", vec!["-j0", "--max-jobs", "1"], true),
+        ("nix-build", vec!["--option", "max-jobs", "1", "-j0"], false),
+        ("nix-build", vec!["-j0", "--option", "max-jobs", "1"], true),
+        ("nix", vec!["-j0", "build", "-j1"], true),
+        ("nix", vec!["-j1", "build", "-j0"], false),
+        ("nix", vec!["-j0", "build", "--max-jobs", "1"], true),
+        ("nix", vec!["--max-jobs", "1", "build", "-j0"], false),
+        ("nix", vec!["-j0", "build", "--option", "max-jobs", "1"], true),
+        ("nix", vec!["--option", "max-jobs", "1", "build", "-j0"], false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let file = s.write(
+            &format!("compact-jobs-{index}.nix"),
+            &format!(
+                r#"{{ selected = derivation {{
+  name = "classic-compact-jobs-{index}-@NONCE@";
+  system = "@SYSTEM@";
+  builder = "@SHELL@";
+  args = [ "-c" "echo compact-jobs > $out" ];
+}}; }}"#
+            ),
+        );
+        let mut cmd = f.ours(name);
+        cmd.env("IETS_NIX_FALLBACK", "never")
+            .args(&flags)
+            .args(["--option", "builders", "", "--cores", "1", "--no-link"]);
+        if name == "nix" {
+            cmd.arg("--file")
+                .arg(&file)
+                .args(["selected", "--print-out-paths"]);
+        } else {
+            cmd.arg(&file).args(["-A", "selected"]);
+        }
+        let o = cmd.output().unwrap();
+        assert!(
+            !stderr(&o).contains("falling back"),
+            "{name} {flags:?}: {}",
+            stderr(&o)
+        );
+        assert_eq!(
+            o.status.success(),
+            allowed,
+            "{name} {flags:?}: {}",
+            stderr(&o)
+        );
+        if allowed {
+            let path = stdout(&o);
+            assert_eq!(fs::read_to_string(path).unwrap(), "compact-jobs\n");
+        } else {
+            assert!(
+                stderr(&o).contains("max-jobs"),
+                "{name} {flags:?}: {}",
+                stderr(&o)
+            );
+            assert!(o.stdout.is_empty(), "{name} {flags:?}: {}", stdout(&o));
+        }
+    }
+}
+
+#[test]
 fn out_links_and_roots() {
     let s = store!();
     let f = Farm::new(&s);

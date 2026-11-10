@@ -103,12 +103,22 @@ impl Argv<'_> {
     }
 }
 
+/// The attached value takes no following argv entry, even when invalid.
+fn attached_max_jobs(s: &str) -> Option<&str> {
+    s.strip_prefix("-j").filter(|v| !v.is_empty())
+}
+
 /// `Ok(true)`: consumed. `Ok(false)`: not one of ours. `Err`: fall back.
 pub fn common_flag(c: &mut Common, a: &mut Argv, s: &str) -> Result<bool, String> {
     if eval_flag(&mut c.flags, s, || a.value(s))? {
         return Ok(true);
     }
     let set = &mut c.flags.overrides;
+    if let Some(v) = attached_max_jobs(s) {
+        config::check_value("max-jobs", v).map_err(|e| e.to_string())?;
+        set.push(("max-jobs".into(), v.into()));
+        return Ok(true);
+    }
     match s {
         "-E" | "--expr" => c.from_args = true,
         "--store" => set.push(("store".into(), a.value(s)?)),

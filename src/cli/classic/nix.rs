@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use super::{
-    Argv, Common, common_flag, develop, drvshow, eval_config, fallback, fmt, local,
-    lookup_file_arg, settings, shell_settings, store_given,
+    Argv, Common, attached_max_jobs, common_flag, develop, drvshow, eval_config, fallback, fmt,
+    local, lookup_file_arg, settings, shell_settings, store_given,
 };
 use crate::api::build::{self, Dispatch, Root};
 use crate::api::{self, flake, installable};
@@ -116,6 +116,10 @@ fn find_sub(argv: &[String]) -> Result<usize, String> {
         if !s.starts_with('-') {
             return Ok(i);
         }
+        if attached_max_jobs(s).is_some() {
+            i += 1;
+            continue;
+        }
         let Some((_, arity)) = GLOBALS.iter().find(|(f, _)| *f == s.as_str()) else {
             return Err(format!("'{s}' is not implemented"));
         };
@@ -126,7 +130,7 @@ fn find_sub(argv: &[String]) -> Result<usize, String> {
 
 /// `Ok(true)`: consumed. `Ok(false)`: not one of ours. `Err`: fall back.
 pub fn global_flag(c: &mut Common, a: &mut Argv, s: &str) -> Result<bool, String> {
-    if !GLOBALS.iter().any(|(f, _)| *f == s) {
+    if attached_max_jobs(s).is_none() && !GLOBALS.iter().any(|(f, _)| *f == s) {
         return Ok(false);
     }
     match s {

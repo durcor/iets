@@ -158,6 +158,100 @@ fn flake(s: &Store, dir: &str) -> String {
 }
 
 #[test]
+fn compact_max_jobs_preserves_eval_arguments() {
+    let s = store!();
+    let f = Farm::new(&s);
+    let file = s.write("compact-jobs.nix", "{ selected = 42; other = 7; }");
+    for embedded in [false, true] {
+        for jobs in ["1", "0", "auto", "4294967295", "1K"] {
+            let flag = format!("-j{jobs}");
+            let mut legacy = if embedded {
+                let mut cmd = s.iets();
+                cmd.arg("nix-instantiate");
+                cmd
+            } else {
+                f.ours("nix-instantiate")
+            };
+            let o = legacy
+                .env("IETS_NIX_FALLBACK", "never")
+                .arg(&flag)
+                .arg(&file)
+                .args(["--eval", "--json", "-A", "selected"])
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{flag}: {}", stderr(&o));
+            assert_eq!(stdout(&o), "42", "{flag}");
+
+            // Before the subcommand, after it, and immediately before the
+            // installable: none of these may consume the following argument.
+            for at in [0, 1, 4] {
+                let mut args = vec!["eval", "--json", "--file"];
+                args.push(file.to_str().unwrap());
+                args.push("selected");
+                args.insert(at, &flag);
+                let mut cmd = if embedded {
+                    let mut cmd = s.iets();
+                    cmd.arg("nix");
+                    cmd
+                } else {
+                    f.ours("nix")
+                };
+                let o = cmd
+                    .env("IETS_NIX_FALLBACK", "never")
+                    .args(&args)
+                    .output()
+                    .unwrap();
+                assert!(o.status.success(), "{args:?}: {}", stderr(&o));
+                assert_eq!(stdout(&o), "42", "{args:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn compact_max_jobs_rejects_invalid_values_without_taking_the_next_value() {
+    let s = store!();
+    let f = Farm::new(&s);
+    for value in ["nope", "-1", "4294967296", "4G", "1auto", "=1"] {
+        let flag = format!("-j{value}");
+        for (name, args) in [
+            (
+                "nix-instantiate",
+                vec![flag.as_str(), "--eval", "--json", "-E", "42"],
+            ),
+            (
+                "nix",
+                vec![flag.as_str(), "eval", "--json", "--expr", "42"],
+            ),
+            (
+                "nix",
+                vec!["eval", "--json", "--expr", "{ x = 42; }", &flag, "x"],
+            ),
+            // A valid numeric positional argument must not replace the
+            // invalid attached value, even when a later setting is valid.
+            (
+                "nix-instantiate",
+                vec!["--eval", "--json", "-E", &flag, "42", "-j", "1"],
+            ),
+        ] {
+            let o = f
+                .ours(name)
+                .env("IETS_NIX_FALLBACK", "never")
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(!o.status.success(), "{name} {args:?}");
+            assert!(
+                stderr(&o).contains("configuration setting 'max-jobs' should be 'auto' or an integer"),
+                "{name} {args:?}: {}",
+                stderr(&o)
+            );
+            assert!(o.stdout.is_empty(), "{name} {args:?}: {}", stdout(&o));
+        }
+    }
+}
+
+#[test]
 fn the_builtins_names() {
     let s = store!();
     let f = Farm::new(&s);
