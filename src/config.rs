@@ -400,7 +400,7 @@ fn is_known(name: &str) -> bool {
 }
 
 /// `name` as the setting it sets: no `extra-`, no alias.
-fn canonical(name: &str) -> &str {
+pub(crate) fn canonical(name: &str) -> &str {
     let alias = |n| ALIASES.iter().find(|(a, _)| *a == n).map(|(_, to)| *to);
     let bare = name.strip_prefix("extra-").map(|b| alias(b).unwrap_or(b));
     match bare {
@@ -503,10 +503,18 @@ impl Config {
         }
     }
 
-    /// `load` for iets's own commands, which send a daemon no settings.
+    /// `load` for iets's own commands that apply no store settings.
     pub fn load_native(overrides: &[(String, String)]) -> Result<Config> {
+        Config::load_native_applied(overrides, &[])
+    }
+
+    /// `load_native`, with the store settings this command does apply.
+    pub(crate) fn load_native_applied(
+        overrides: &[(String, String)],
+        applied: &[&str],
+    ) -> Result<Config> {
         let why = "iets's own commands send a daemon no settings; classic mode does";
-        note_unsent(overrides, &[], why);
+        note_unsent(overrides, applied, why);
         Config::load(overrides)
     }
 

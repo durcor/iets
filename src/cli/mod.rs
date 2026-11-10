@@ -129,11 +129,28 @@ pub fn cache_flag(a: &mut EvalArgs, s: &str, mut next: impl FnMut() -> String) -
 }
 
 pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
+    parse_native_args(argv, false).0
+}
+
+/// Build aliases share `--option`'s ordered, validated config path. The
+/// Boolean records explicit limits, which gRPC cannot apply.
+fn parse_build_eval_args(argv: &[String]) -> (EvalArgs, bool) {
+    parse_native_args(argv, true)
+}
+
+fn parse_native_args(argv: &[String], build: bool) -> (EvalArgs, bool) {
     let mut a = EvalArgs::new();
     let mut f = EvalFlags::default();
     each_arg(argv, |s, next| {
         match s {
             _ if eval_flag(&mut f, s, || Ok(next())).unwrap_or_else(|e| arg_error(e)) => {}
+            "-j" | "--max-jobs" if build => {
+                f.overrides.push(("max-jobs".into(), next()));
+            }
+            "--cores" if build => f.overrides.push(("cores".into(), next())),
+            _ if build && s.starts_with("-j") && s.len() > 2 => {
+                f.overrides.push(("max-jobs".into(), s[2..].into()));
+            }
             "--strict" => a.strict = true,
             "--json" => a.json = true,
             "--raw" => a.raw = true,
@@ -183,15 +200,20 @@ pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
             _ => set_positional(&mut a, s),
         }
     });
-    // for its warnings, and for the session's copy that the fetcher reads
-    if let Err(e) = config::Config::load_native(&f.overrides) {
+    let explicit_limits = build && f.overrides.iter().any(|(name, _)| {
+        matches!(config::canonical(name), "max-jobs" | "cores")
+    });
+    let applied = if build { &["max-jobs", "cores", "store"][..] } else { &[] };
+    // Keep the ordered config in the session for fetchers and the build,
+    // rather than re-reading it later without the command-line overrides.
+    if let Err(e) = config::Config::load_native_applied(&f.overrides, applied) {
         session::exit(e.report())
     }
     ignored::flush();
     (a.includes, a.args, a.pure) = (f.includes, f.args, f.pure);
     a.attrs = f.attrs;
     a.attr = a.attrs.last().cloned();
-    a
+    (a, explicit_limits)
 }
 
 /// The input a positional argument (or `-f`) names: a flake reference when

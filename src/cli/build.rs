@@ -17,7 +17,7 @@ use crate::build::{Outcome, Target};
 use crate::cli::help::{arg_error, each_arg};
 use crate::cli::render::{self, text};
 use crate::cli::{
-    self, EvalArgs, Input, Run, build_targets, devenv, parse_eval_args, report, run_for,
+    self, EvalArgs, Input, Run, build_targets, devenv, parse_build_eval_args, report, run_for,
 };
 use crate::error::Error as CrateError;
 use crate::eval::{self, Evaluator};
@@ -39,6 +39,7 @@ struct BuildArgs {
     dry_run: bool,
     json: bool,
     keep_going: bool,
+    explicit_limits: bool,
     fetch_to: Option<PathBuf>,
     out_link: Option<String>,
     outputs: Vec<String>,
@@ -109,6 +110,7 @@ fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
         dry_run: false,
         json: false,
         keep_going: false,
+        explicit_limits: false,
         fetch_to: None,
         out_link: None,
         outputs: Vec::new(),
@@ -135,7 +137,8 @@ fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
         }
         s => rest.push(s.to_string()),
     });
-    let a = parse_eval_args(&rest);
+    let (a, explicit_limits) = parse_build_eval_args(&rest);
+    b.explicit_limits = explicit_limits;
     b.root_key = root_key(&installables(&a));
     (b, a)
 }
@@ -378,10 +381,20 @@ fn build_roots(
     if roots.is_empty() {
         return no_output("nothing to build: the expression has no derivation in it");
     }
-    let cfg = apibuild::config();
-    let transport = match apibuild::transport(b.url.as_deref(), &cfg) {
+    let session = Session::current();
+    let cfg = session.nix_conf.get().expect("build arguments load nix.conf");
+    let transport = match apibuild::transport(b.url.as_deref(), cfg) {
         Ok(t) => t,
         Err(e) => return e.report(),
+    };
+    if b.explicit_limits && matches!(transport, worker::Transport::Grpc(_)) {
+        arg_error(
+            "max-jobs and cores flags/--option settings are not supported by a grpc:// builder; use its URL's 'max-builds' for concurrency (no cores control)",
+        )
+    }
+    let (max_jobs, cores) = match (cfg.max_jobs(), cfg.cores()) {
+        (Ok(jobs), Ok(cores)) => (jobs, cores),
+        (Err(e), _) | (_, Err(e)) => return e.report(),
     };
     let t0 = Instant::now();
     let plan = match apibuild::plan_with(roots, inputs.drvs, inputs.sources) {
@@ -396,6 +409,8 @@ fn build_roots(
         );
     }
     let opts = worker::Options {
+        max_jobs,
+        cores,
         // one root is one question, and its first failure answers it; several
         // roots are several questions, and each one gets its verdict
         keep_going: b.keep_going || roots.len() > 1,

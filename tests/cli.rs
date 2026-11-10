@@ -92,6 +92,66 @@ fn a_bad_command_line_names_the_problem(bin: Iets, #[case] args: &[&str], #[case
     );
 }
 
+#[rstest]
+fn build_limits_fail_before_evaluation_or_connection(bin: Iets) {
+    for (flags, want) in [
+        (vec!["-j", "-1"], "configuration setting 'max-jobs'"),
+        (vec!["-jnope"], "configuration setting 'max-jobs'"),
+        (vec!["--max-jobs", "4294967296"], "configuration setting 'max-jobs'"),
+        (vec!["-j4294967296"], "configuration setting 'max-jobs'"),
+        (vec!["--cores", "-1"], "setting 'cores' has invalid value"),
+        (vec!["--cores", "auto"], "setting 'cores' has invalid value"),
+        (vec!["--cores", "4294967296"], "setting 'cores' has invalid value"),
+        (vec!["-jnope", "-j1"], "configuration setting 'max-jobs'"),
+    ] {
+        let o = bin.cmd()
+            .args(["build", "--builder", "unix:///nonexistent/limits.socket"])
+            .args(&flags)
+            .args(["-E", "throw \"evaluated-before-validation\""])
+            .output().unwrap();
+        let err = stderr(&o);
+        assert!(!o.status.success(), "{flags:?}: {err}");
+        assert!(err.contains(want), "{flags:?}: {err}");
+        assert!(!err.contains("evaluated-before-validation"), "{err}");
+        assert!(o.stdout.is_empty());
+    }
+    for flag in ["-j", "--max-jobs", "--cores"] {
+        let o = run(&bin, &["build", flag]);
+        assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+        assert!(stderr(&o).contains(&format!("{flag} needs a value")), "{}", stderr(&o));
+    }
+    let o = bin.cmd()
+        .env("NIX_CONFIG", "max-jobs = invalid")
+        .args(["build", "-j1", "-E", "throw \"evaluated-before-validation\""])
+        .output().unwrap();
+    assert!(!o.status.success());
+    assert!(stderr(&o).contains("configuration setting 'max-jobs'"), "{}", stderr(&o));
+}
+
+#[rstest]
+fn grpc_rejects_explicit_build_limits_instead_of_claiming_enforcement(bin: Iets) {
+    for flags in [
+        vec!["-j", "1"],
+        vec!["-j1"],
+        vec!["--max-jobs", "auto"],
+        vec!["--cores", "0"],
+        vec!["--option", "max-jobs", "1"],
+        vec!["--option", "build-max-jobs", "1"],
+        vec!["--option", "build-cores", "1"],
+    ] {
+        let o = bin.cmd()
+            .args(["build", "--builder", "grpc://127.0.0.1:1"])
+            .args(&flags)
+            .args(["-E", "derivation { name = \"limits\"; system = builtins.currentSystem; builder = \"/nonexistent/builder\"; }"])
+            .output().unwrap();
+        let err = stderr(&o);
+        assert_eq!(o.status.code(), Some(2), "{flags:?}: {err}");
+        assert!(err.contains("grpc://") && err.contains("max-builds"), "{err}");
+        assert!(err.contains("cores") && err.contains("not supported"), "{err}");
+        assert!(o.stdout.is_empty());
+    }
+}
+
 /// What the system says for a path that is not there.
 const NO_SUCH_FILE: &str = if cfg!(windows) {
     "The system cannot find the path specified."

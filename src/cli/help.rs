@@ -83,6 +83,12 @@ derivations is built whole, each member to its own verdict: 'iets build
 
   --builder URL         daemon, unix:///path, ssh-ng://[user@]host or
                         grpc://host:port (default: the builder setting)
+  -j N, -jN, --max-jobs N  concurrent local builds (number or auto)
+                        0 forbids local builds; default: nix.conf or auto
+  --cores N             cores per build (default: nix.conf or 0 = all)
+                        jobs/cores require daemon, unix or ssh-ng;
+                        grpc uses URL max-builds, with no cores control
+                        --workers controls evaluator threads, not builds
   --no-build            upload the closure, do not build
   --dry-run             upload the closure, print what would be built and
                         fetched, do not build; --json: as JSON on stdout
