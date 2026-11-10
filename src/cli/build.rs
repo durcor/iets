@@ -382,15 +382,24 @@ fn build_roots(
         return no_output("nothing to build: the expression has no derivation in it");
     }
     let session = Session::current();
-    let cfg = session.nix_conf.get().expect("build arguments load nix.conf");
+    let cfg = session
+        .nix_conf
+        .get()
+        .expect("build arguments load nix.conf");
     let transport = match apibuild::transport(b.url.as_deref(), cfg) {
         Ok(t) => t,
         Err(e) => return e.report(),
     };
-    if b.explicit_limits && matches!(transport, worker::Transport::Grpc(_)) {
-        arg_error(
-            "max-jobs and cores flags/--option settings are not supported by a grpc:// builder; use its URL's 'max-builds' for concurrency (no cores control)",
-        )
+    if b.explicit_limits {
+        match &transport {
+            worker::Transport::Grpc(_) => arg_error(
+                "max-jobs and cores flags/--option settings are not supported by a grpc:// builder; use its URL's 'max-builds' for concurrency (no cores control)",
+            ),
+            worker::Transport::Ssh { .. } => arg_error(
+                "max-jobs and cores flags/--option settings are not supported by an ssh-ng:// builder; the remote service's resource policy applies (no SetOptions)",
+            ),
+            worker::Transport::Unix(_) => {}
+        }
     }
     let (max_jobs, cores) = match (cfg.max_jobs(), cfg.cores()) {
         (Ok(jobs), Ok(cores)) => (jobs, cores),

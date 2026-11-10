@@ -72,6 +72,32 @@ The root comes from that file, and its closure from `/nix/store`.
 `--source STOREPATH=LOCAL` names the original local tree of an input
 source.
 
+### Job and core limits
+
+For `daemon` and `unix://`, `iets build -j1 --cores 1 .#pkg` sets one
+concurrent local build and one core per build. `-j N`, `-jN` and
+`--max-jobs N` set `max-jobs`; `--cores N` sets `cores`. The defaults come
+from nix.conf, including user files and `NIX_CONFIG`, then command-line
+flags and `--option` pairs apply in order: the last setting wins. Aliases
+such as `--option build-max-jobs 1` and `--option build-cores 1` participate
+in the same order. A cached evaluation still uses the current limits.
+
+Jobs accept a bounded unsigned integer or `auto` (the CPU count). Jobs `0`
+forbids local builds, but already-built outputs can still be used. Cores
+accept a bounded unsigned integer; `0` means all available cores, not a
+hard CPU or memory cap. Builders receive `NIX_BUILD_CORES` and must honor
+it. Both integer settings are bounded by 4294967295. `--workers` controls
+evaluation threads, not build jobs or per-build cores.
+
+`ssh-ng://` deliberately sends no `SetOptions`: the remote service's own
+resource policy applies. `grpc://` has no `SetOptions` or cores field; its
+URL's `max-builds` limits concurrent calls. Configured client-side jobs and
+cores do not limit either transport. Native `iets build` rejects explicit
+job/core flags and `--option` forms on these transports before connecting,
+rather than claiming to enforce them. Classic mode's existing behavior is
+unchanged: SSH uses remote settings and gRPC warns about unsent settings.
+
+
 ## Transports
 
 `iets build`, classic `nix-build` and `nix build` build the same way over
@@ -81,7 +107,7 @@ the same way. `iets eval-jobs` uploads in batches while the walk runs.
 | | worker protocol (`daemon`, `unix://`, `ssh-ng://`) | `grpc://` |
 |---|---|---|
 | a ready set | one `BuildPathsWithResults` | a `Want` on the `Schedule` stream and one `BuildDerivation` per derivation of the set's closure, `max-builds` in flight |
-| build parallelism | the daemon's, `-j` through `SetOptions` | the client's, in flight, placed by the scheduler |
+| build parallelism | daemon/unix: `-j` through `SetOptions`; ssh-ng: remote policy | the client's URL `max-builds`, in flight, placed by the scheduler |
 | log lines | attributed by the daemon's activity ids | by the call, which knows its derivation |
 | output paths | `QueryDerivationOutputMap` | statically, from the derivations |
 | out-links | the local daemon, the closure copied back first | the local daemon substitutes from its caches; the rest by `FetchNars` |
@@ -110,10 +136,11 @@ Over `daemon` and `unix://`, iets sends the fields Nix's
 | Option | Value |
 |:---|:---|
 | keep-going | 1 with `--keep-going` or more than one root, else 0 |
-| max-jobs | the CPU count (0 would forbid local builds) |
+| max-jobs | configured `max-jobs`, overridden by job flags/`--option`; default `auto` (CPU count), 0 forbids local builds |
 | build verbosity | `lvlVomit`, so builder output arrives as results attributed to their build activity |
 | substitutes | on |
-| keep-failed, try-fallback, max-silent-time, cores | 0 |
+| cores | configured `cores`, overridden by `--cores`/`--option`; default 0 (all cores) |
+| keep-failed, try-fallback, max-silent-time | 0 |
 | the override map | empty |
 
 In classic mode, these come from nix.conf instead: `keep-failed`,

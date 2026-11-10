@@ -77,7 +77,7 @@ section lists.
 | `-I P=PATH`, `--include P=PATH`, `-IP=PATH` | make `<P>` resolve to `PATH` |
 | `--impure`, `--no-pure-eval` | turn pure evaluation off; it is on by default, and the `pure` key in the user `iets.toml` changes that (`docs/reference/settings.md`) |
 | `--pure-eval` | turn pure evaluation on |
-| `--option NAME VALUE` | set a nix.conf setting. The evaluation and fetch settings apply (`docs/reference/settings.md`). A store setting gives one `ignored-setting` warning: these commands send a daemon no settings |
+| `--option NAME VALUE` | set a nix.conf setting. Evaluation and fetch settings apply (`docs/reference/settings.md`). `iets build` also applies `store`, `max-jobs` and `cores` as described below; other unapplied store settings give one `ignored-setting` warning |
 | `--json-log-path PATH` | also write every log record to `PATH` |
 | `--log-format F` | `internal-json`, `raw`, `raw-with-logs`, `bar`, `bar-with-logs` |
 | `--show-trace` | put the trace into the JSON error records too |
@@ -171,6 +171,8 @@ to evaluate stops the run before anything builds.
 | Flag | Effect |
 |:---|:---|
 | `--builder URL` | `daemon`, `unix:///path`, `ssh-ng://[user@]host` or `grpc://host:port`; default: the `builder` setting |
+| `-j N`, `-jN`, `--max-jobs N` | concurrent local builds on `daemon`/`unix://`; configured `max-jobs`, else `auto` (CPU count); `0` forbids local builds |
+| `--cores N` | cores per build on `daemon`/`unix://`; configured `cores`, else `0` (all cores); not a hard resource cap |
 | `--no-build` | upload the closure, build nothing |
 | `--dry-run` | upload the closure, print the plan, build nothing |
 | `--json` | print the outcomes as one JSON object instead of the paths |
@@ -180,7 +182,19 @@ to evaluate stops the run before anything builds.
 | `-o`, `--out-link PATH` | bring the outputs into the local store and link them at `PATH`, `PATH-1`, ... |
 | `--source SP=LOCAL` | with a `DRV` argument: the local tree of the input source `SP` |
 
-It also takes the shared evaluation flags.
+It also takes the shared evaluation flags. `--workers` limits evaluator
+threads, not build concurrency. Job/core flags and `--option` settings
+(including `build-max-jobs` and `build-cores` aliases) apply in command-line
+order after nix.conf/user files/`NIX_CONFIG`; the last setting wins.
+Invalid or missing resource values fail before opening a build connection.
+Jobs accept `auto` or an unsigned integer; cores accept an unsigned integer.
+Both integer values must fit in 32 bits.
+
+Explicit job/core flags and `--option` forms are rejected before connecting
+to `ssh-ng://` or `grpc://`. SSH inherits the remote service's resource
+policy. gRPC uses its URL's `max-builds` instead and has no cores control.
+Configured jobs and cores are not enforced on these transports
+(`docs/reference/builders.md`).
 
 - stdout: one output path per line, in root order. With `--json`, the
   outcomes as one JSON object instead. With `--dry-run --json`, the plan.

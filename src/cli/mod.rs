@@ -133,7 +133,7 @@ pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
 }
 
 /// Build aliases share `--option`'s ordered, validated config path. The
-/// Boolean records explicit limits, which gRPC cannot apply.
+/// Boolean records explicit limits for transports that cannot apply them.
 fn parse_build_eval_args(argv: &[String]) -> (EvalArgs, bool) {
     parse_native_args(argv, true)
 }
@@ -200,10 +200,15 @@ fn parse_native_args(argv: &[String], build: bool) -> (EvalArgs, bool) {
             _ => set_positional(&mut a, s),
         }
     });
-    let explicit_limits = build && f.overrides.iter().any(|(name, _)| {
-        matches!(config::canonical(name), "max-jobs" | "cores")
-    });
-    let applied = if build { &["max-jobs", "cores", "store"][..] } else { &[] };
+    let explicit_limits = build
+        && f.overrides
+            .iter()
+            .any(|(name, _)| matches!(config::canonical(name), "max-jobs" | "cores"));
+    let applied = if build {
+        &["max-jobs", "cores", "store"][..]
+    } else {
+        &[]
+    };
     // Keep the ordered config in the session for fetchers and the build,
     // rather than re-reading it later without the command-line overrides.
     if let Err(e) = config::Config::load_native_applied(&f.overrides, applied) {

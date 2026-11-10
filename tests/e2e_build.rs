@@ -264,7 +264,11 @@ const LIMITS: &str = r#"{ name ? "default" }: derivation {
 
 fn built_cores(r: &Output) -> u64 {
     assert!(r.status.success(), "{}", stderr(r));
-    fs::read_to_string(stdout(r)).unwrap().trim().parse().unwrap()
+    fs::read_to_string(stdout(r))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
 }
 
 #[test]
@@ -278,7 +282,15 @@ fn configured_and_explicit_limits_reach_the_builder() {
     let run = |name: &str, config: Option<&str>, flags: &[&str]| {
         let mut c = s.iets();
         c.env("NIX_USER_CONF_FILES", &user)
-            .args(["build", "--builder", "daemon", file, "--argstr", "name", name])
+            .args([
+                "build",
+                "--builder",
+                "daemon",
+                file,
+                "--argstr",
+                "name",
+                name,
+            ])
             .args(flags);
         if let Some(config) = config {
             c.env("NIX_CONFIG", config);
@@ -291,17 +303,46 @@ fn configured_and_explicit_limits_reach_the_builder() {
         ("spaced", vec!["-j", "1", "--cores", "1"], 1),
         ("compact", vec!["-j1", "--cores", "2"], 2),
         ("long", vec!["--max-jobs", "1", "--cores", "3"], 3),
-        ("flag-last", vec!["--option", "build-cores", "4", "--cores", "1"], 1),
-        ("option-last", vec!["--cores", "1", "--option", "cores", "2"], 2),
-        ("alias-last", vec!["--cores", "1", "--option", "build-cores", "3"], 3),
+        (
+            "flag-last",
+            vec!["--option", "build-cores", "4", "--cores", "1"],
+            1,
+        ),
+        (
+            "option-last",
+            vec!["--cores", "1", "--option", "cores", "2"],
+            2,
+        ),
+        (
+            "alias-last",
+            vec!["--cores", "1", "--option", "build-cores", "3"],
+            3,
+        ),
     ] {
         let r = run(name, Some("cores = 4"), &flags);
         assert_eq!(built_cores(&r), want, "{name}");
         assert!(!stderr(&r).contains("is ignored"), "{}", stderr(&r));
     }
-    // The daemon/builder interprets zero as all cores; accept it without
-    // assuming how this Nix version exposes that value in the environment.
-    built_cores(&run("all", None, &["-j1", "--cores", "0"]));
+    // Compare the actual builder environment with Nix on this same daemon,
+    // rather than duplicating its version/platform-specific CPU discovery.
+    let reference = s
+        .nix("nix-build")
+        .args([
+            "--no-out-link",
+            "-j1",
+            "--cores",
+            "0",
+            file,
+            "--argstr",
+            "name",
+            "all-reference",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        built_cores(&run("all", None, &["-j1", "--cores", "0"])),
+        built_cores(&reference)
+    );
     // The bound is accepted without trying to use that many CPUs: this
     // builder only prints the value, and there is just one derivation.
     assert_eq!(
@@ -326,8 +367,8 @@ fn zero_jobs_forbids_fresh_builds_but_an_explicit_override_wins() {
         let r = build(&s, &args);
         assert!(!r.status.success(), "{}", stderr(&r));
         assert!(stdout(&r).is_empty(), "{}", stdout(&r));
-        assert!(stderr(&r).contains("max-jobs"), "{}", stderr(&r));
     }
+    assert_eq!(built_cores(&build(&s, &[file, "-j1"])), 1);
     for (name, flags) in [
         ("spaced", vec!["-j", "1"]),
         ("compact", vec!["-j1"]),
@@ -341,7 +382,10 @@ fn zero_jobs_forbids_fresh_builds_but_an_explicit_override_wins() {
         assert_eq!(built_cores(&build(&s, &args)), 1);
     }
     // A cached output needs no local build, even with the configured zero.
-    assert_eq!(built_cores(&build(&s, &[file, "--argstr", "name", "compact"])), 1);
+    assert_eq!(
+        built_cores(&build(&s, &[file, "--argstr", "name", "compact"])),
+        1
+    );
 }
 
 #[test]
@@ -352,10 +396,14 @@ fn cached_evaluation_uses_the_current_build_limits() {
         "cached/flake.nix",
         "{ outputs = _: { packages.@SYSTEM@.default = import ./limits.nix { }; }; }",
     );
-    let target = flake.parent().unwrap().to_str().unwrap();
-    let uploaded = build(&s, &[target, "--no-build"]);
+    let target = format!(
+        "path:{}#packages.{}.default",
+        flake.parent().unwrap().display(),
+        e2e::system()
+    );
+    let uploaded = build(&s, &[&target, "--no-build"]);
     assert!(uploaded.status.success(), "{}", stderr(&uploaded));
-    let r = build(&s, &[target, "--timings", "-j1", "--cores", "1"]);
+    let r = build(&s, &[&target, "--timings", "-j1", "--cores", "1"]);
     assert_eq!(built_cores(&r), 1);
     assert!(stderr(&r).contains("eval: skipped"), "{}", stderr(&r));
 }

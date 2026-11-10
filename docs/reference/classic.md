@@ -36,6 +36,22 @@ Some things stay local whatever `builder` says:
   shell runs on your machine, so the local daemon builds or substitutes its
   inputs. `--store` still wins.
 
+Job flags accept both `-j N` and compact `-jN` in `nix-instantiate`,
+`nix-build`, `nix-shell` and supported `nix` commands. For example,
+`iets nix -j1 build .#pkg` and `iets nix build -j1 .#pkg` are both native,
+including with `IETS_NIX_FALLBACK=never`. Attached values use the existing
+`max-jobs` setting validation (`auto` or a bounded unsigned integer), and
+do not consume the argument after them. Job flags and `--option` overrides
+still apply in command-line order, with the last setting winning.
+
+Limits reach `daemon`/`unix://` through `SetOptions`. Existing SSH behavior
+is unchanged: `ssh-ng://` sends no `SetOptions`, so the remote service's
+policy applies. Existing gRPC behavior is also unchanged: it warns about
+unsent settings and uses URL `max-builds`, not nix.conf jobs or cores.
+Native `iets build` rejects explicit resource flags for these transports
+instead (`docs/reference/builders.md`).
+
+
 ## The NixOS module
 
 `nix/module.nix` installs `packages.default`. On a host with direnv, it also

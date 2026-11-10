@@ -70,8 +70,16 @@ fn compact_max_jobs_build_limits_and_last_setting_win() {
         ("nix", vec!["-j1", "build", "-j0"], false),
         ("nix", vec!["-j0", "build", "--max-jobs", "1"], true),
         ("nix", vec!["--max-jobs", "1", "build", "-j0"], false),
-        ("nix", vec!["-j0", "build", "--option", "max-jobs", "1"], true),
-        ("nix", vec!["--option", "max-jobs", "1", "build", "-j0"], false),
+        (
+            "nix",
+            vec!["-j0", "build", "--option", "max-jobs", "1"],
+            true,
+        ),
+        (
+            "nix",
+            vec!["--option", "max-jobs", "1", "build", "-j0"],
+            false,
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -88,9 +96,14 @@ fn compact_max_jobs_build_limits_and_last_setting_win() {
             ),
         );
         let mut cmd = f.ours(name);
-        cmd.env("IETS_NIX_FALLBACK", "never")
-            .args(&flags)
-            .args(["--option", "builders", "", "--cores", "1", "--no-link"]);
+        cmd.env("IETS_NIX_FALLBACK", "never").args(&flags).args([
+            "--option",
+            "builders",
+            "",
+            "--cores",
+            "1",
+            "--no-link",
+        ]);
         if name == "nix" {
             cmd.arg("--file")
                 .arg(&file)
@@ -114,12 +127,15 @@ fn compact_max_jobs_build_limits_and_last_setting_win() {
             let path = stdout(&o);
             assert_eq!(fs::read_to_string(path).unwrap(), "compact-jobs\n");
         } else {
-            assert!(
-                stderr(&o).contains("max-jobs"),
-                "{name} {flags:?}: {}",
-                stderr(&o)
-            );
             assert!(o.stdout.is_empty(), "{name} {flags:?}: {}", stdout(&o));
+            // Prove this same derivation is valid and the zero-job setting,
+            // rather than a broken builder, was what refused it.
+            let overridden = cmd.arg("-j1").output().unwrap();
+            assert!(overridden.status.success(), "{}", stderr(&overridden));
+            assert_eq!(
+                fs::read_to_string(stdout(&overridden)).unwrap(),
+                "compact-jobs\n"
+            );
         }
     }
 }

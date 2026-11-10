@@ -219,10 +219,7 @@ fn compact_max_jobs_rejects_invalid_values_without_taking_the_next_value() {
                 "nix-instantiate",
                 vec![flag.as_str(), "--eval", "--json", "-E", "42"],
             ),
-            (
-                "nix",
-                vec![flag.as_str(), "eval", "--json", "--expr", "42"],
-            ),
+            ("nix", vec![flag.as_str(), "eval", "--json", "--expr", "42"]),
             (
                 "nix",
                 vec!["eval", "--json", "--expr", "{ x = 42; }", &flag, "x"],
@@ -242,7 +239,8 @@ fn compact_max_jobs_rejects_invalid_values_without_taking_the_next_value() {
                 .unwrap();
             assert!(!o.status.success(), "{name} {args:?}");
             assert!(
-                stderr(&o).contains("configuration setting 'max-jobs' should be 'auto' or an integer"),
+                stderr(&o)
+                    .contains("configuration setting 'max-jobs' should be 'auto' or an integer"),
                 "{name} {args:?}: {}",
                 stderr(&o)
             );

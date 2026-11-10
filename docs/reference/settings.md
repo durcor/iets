@@ -277,7 +277,9 @@ iets applies these in order, and each overrides the ones before it.
    - `<dir>/nix/nix.conf` for each `$XDG_CONFIG_DIRS` entry (by default
      `/etc/xdg`).
 3. `$NIX_CONFIG`, read as the text of one more file.
-4. The `--option name value` pairs from the command line.
+4. The `--option name value` pairs and supported setting-alias flags from
+   the command line, in order. For native builds, `-j N`/`-jN`/`--max-jobs N`
+   and `--cores N` participate in this same order; the last setting wins.
 
 A file that is missing or unreadable is skipped.
 
@@ -352,9 +354,15 @@ as it does for a Nix client. `store` is not sent: it names the daemon. A
 list setting that only got `extra-` values goes as `extra-NAME`, which the
 daemon appends to its own value.
 
-Classic mode does this. iets's own commands (`iets eval`, `build`,
-`eval-jobs`, `print-dev-env`, `diff`) send Nix's defaults and no
-overrides. There, a store setting given with `--option` gives one warning:
+Classic mode does this over `daemon`/`unix://`. Native `iets build` also
+applies configured `max-jobs` and `cores`, with its job/core flags and
+`--option` aliases overriding them in order. Jobs `0` forbids local builds;
+cores `0` gives a builder all cores, not a hard resource cap. `--workers`
+still controls evaluation threads only.
+
+Other native worker fields retain their existing defaults and the override
+map stays empty (`docs/reference/builders.md`). A store setting that the
+native command does not apply, given with `--option`, gives one warning:
 
 ```
 warning: setting 'sandbox' is ignored: iets's own commands send a daemon no settings; classic mode does
@@ -363,6 +371,13 @@ warning: setting 'sandbox' is ignored: iets's own commands send a daemon no sett
 A `grpc://` builder has no `SetOptions`. For it, classic mode gives
 the same warning, with the reason `a grpc:// builder takes no settings;
 its URL has 'max-builds'`. `store` and `system` still apply.
+
+Native `iets build` rejects explicit job/core flags and `--option` forms
+for `grpc://` and `ssh-ng://` before connecting. Configured jobs/cores do
+not limit either transport: gRPC uses URL `max-builds` and has no cores
+control; SSH sends no `SetOptions` and inherits the remote service's
+resource policy. Classic mode keeps its existing gRPC warnings and SSH
+behavior; this does not add resource forwarding to either transport.
 
 **3. It holds by construction.** iets says nothing.
 
