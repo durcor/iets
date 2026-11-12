@@ -72,11 +72,21 @@ for installation scope and explicit resource selection.
 
 NH's normal `nix build ... --log-format internal-json --verbose | nom --json`
 pipeline is supported without changing arguments or disabling nom. Classic
-`nix` accepts `-v` and `--verbose` before or after its subcommand. As with
-other classic verbosity flags, iets keeps its existing single log level
-and emits an ignored-flag warning rather than increasing verbosity. Activity
-start/stop, progress and builder log records still reach nom; a failing
-builder still makes NH fail. Flag-shaped `--argstr` values remain operands.
+`nix` accepts `-v`/`--verbose`, pure `-vv…` clusters, `--quiet` and
+`--debug` before or after its subcommand. They change the real message
+threshold, in argument order: verbose raises it to at most 7, quiet lowers
+it to at least 0, and debug selects 6. Flag-shaped operands remain data;
+unrelated short-option clusters are not expanded.
+
+The levels are error 0, warning 1, notice 2, info 3, talkative 4, chatty 5,
+debug 6 and vomit 7. Modern `nix` starts at notice on a color-capable stderr
+terminal (`TERM` is set and not `dumb`, with neither `NO_COLOR` nor
+`NOCOLOR` set), and info otherwise, matching Nix's `isTTY`. Legacy commands
+start at info. `--quiet` is distinct from `-Q`/`--no-build-output`: it changes
+message verbosity, not the builder-log policy. Errors and strict fallback
+reasons remain visible at level 0. Activity start/stop, progress and builder
+log records still reach nom at every level; a failing builder still makes NH
+fail. See [Log records](errors.md#verbosity) for audit and cache behavior.
 
 To prove one supported main build is native while allowing NH's helper
 queries to fall back, forward `-- --iets-option nix-fallback never` to that
@@ -123,7 +133,8 @@ Flags:
 - `--add-root PATH` (`--indirect` is accepted), `--readonly-mode`,
   `--read-write-mode`, `--dry-run`.
 - `--show-trace`, `--no-gc-warning`, `--option`, `--store`,
-  `-j`/`--max-jobs`, `--cores`, `-k`, `-K`, `-Q`, `--quiet`, `-v`.
+  `-j`/`--max-jobs`, `--cores`, `-k`, `-K`, `-Q`, `--quiet`,
+  `-v`/`--verbose`, `--debug`.
 
 By default it evaluates, finds the derivations in the value, registers
 their closure with the daemon, and prints one root per line. A root is the
@@ -144,11 +155,9 @@ refuses it), and any other flag.
 
 Flags: `[FILE...]` (default `.`), `-E`, `-A`, `--arg`/`--argstr`, `-I`,
 `-o`/`--out-link`, `--no-out-link`/`--no-link`, `-j`/`--max-jobs`,
-`--cores`, `-k`, `-K`, `-Q`/`--no-build-output`, `--quiet`, `-v`,
-`--show-trace`, `--option`, `--store`, and `--add-drv-link` and
-`--indirect` (these two do nothing in Nix either). `-v` has no effect and
-gives one warning (`docs/reference/divergences.md`, **Flags and settings
-with no effect**).
+`--cores`, `-k`, `-K`, `-Q`/`--no-build-output`, `--quiet`,
+`-v`/`--verbose`, `--debug`, `--show-trace`, `--option`, `--store`, and
+`--add-drv-link` and `--indirect` (these two do nothing in Nix either).
 
 It uploads the closure once and builds every root in one go. Then it makes
 the links, as Nix does:
@@ -176,7 +185,7 @@ Falls back on: `--dry-run`, `--drv-link`, `--run-env`, `--command`,
 Flags: `[FILE]`, `-E`/`--expr`, `-A`, `--arg`/`--argstr`, `-I`,
 `--run CMD`, `--command CMD`, `--pure`, `--impure`, `--keep NAME`,
 `--option`, `--store`, `-j`/`--max-jobs`, `--cores`, `-k`, `-K`,
-`-Q`/`--no-build-output`, `--quiet`, `-v`, `--show-trace`, and
+`-Q`/`--no-build-output`, `--quiet`, `-v`/`--verbose`, `--debug`, `--show-trace`, and
 `--add-drv-link`, `--indirect` and `--no-gc-warning` (these three do
 nothing in Nix's `nix-shell` either). With no `FILE`, or a directory, it
 looks for `shell.nix` and then `default.nix`. `<name>` goes through the
@@ -569,10 +578,10 @@ these:
 - `store = auto` is the daemon socket. The real Nix uses the local store
   directly when it can write to it.
 - `-Q`/`--no-build-output` drops the daemon's log lines. In Nix 2.34 it only
-  switches the log format to `raw`. `--quiet` does the same here. In Nix it
-  lowers the log level by one.
+  switches the log format to `raw`. `--quiet` instead lowers the message
+  threshold by one, as in Nix, without dropping structured build-log records.
 - A flag or setting that has no effect gives one warning on stderr, where
-  Nix prints nothing: `-v`, `--eval-store auto` and `log-lines`, and
+  Nix prints nothing: `--eval-store auto` and `log-lines`, and
   `--accept-flake-config` and `accept-flake-config = true` when the flake
   has a `nixConfig`. Any other client setting
   that iets has nothing for (`restrict-eval`, `eval-system`, …) falls back.

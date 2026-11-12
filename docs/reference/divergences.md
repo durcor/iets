@@ -732,8 +732,9 @@ that has no effect falls into one of these classes:
 4. **One warning per key and process**, with the reason. Nix prints nothing
    here, so each warning is a divergence on stderr. stdout and the exit code
    do not change. The record is level 1 with the code `ignored-flag` or
-   `ignored-setting` (`docs/reference/errors.md`). It appears under
-   `--log-format internal-json` and in the `json-log-path` file. An
+   `ignored-setting` (`docs/reference/errors.md`). Stderr, including
+   `--log-format internal-json`, respects the session's message threshold;
+   the `json-log-path` audit file retains the collected warning. An
    `eval-jobs` worker does not repeat the warning of its parent. A run that
    the tracing cache answers gives the warning too, because it comes from the
    command line and the settings. It can come before a fallback.
@@ -742,8 +743,6 @@ Class 4 covers these flags:
 
 | Flag | Where | The reason in the warning |
 |:---|:---|:---|
-| `-v`, `--verbose` | `nix-instantiate`, `nix-build`, `nix-shell`; `-vv` and more fall back | iets has one log level, the one Nix starts at |
-| `--verbose`, `--debug` | `eval-jobs` | the same |
 | `--accept-flake-config` | `nix` | iets never applies a flake's `nixConfig` ("A flake's `nixConfig`") |
 | `--eval-store auto`, `daemon`, `""` | `nix`; any other value falls back | iets evaluates in memory and needs no evaluation store |
 | `--readonly-mode` | `iets build`, `eval-jobs`, `print-dev-env` | the command writes to the store; `eval` and `eval-jobs --no-instantiate` do not |
@@ -914,6 +913,9 @@ things differ from Nix 2.34:
 - **`json-log-path`** applies to every command. Nix applies it to the
   `nix` command only: classic mode returns before `applyJSONLogger`
   (`src/nix/main.cc`).
+  It also retains collected messages hidden by stderr's verbosity threshold;
+  diagnostic collection and cached-warning storage are not filtered. Cache
+  replay uses the current threshold without changing the cache key.
 - **A failed write on stdout** gives `error: write of N bytes: REASON`
   and exit 1, as it does in Nix, but `N` is the bytes of the one write
   that failed. iets writes a value and its newline together, so its

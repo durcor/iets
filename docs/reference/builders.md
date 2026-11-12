@@ -137,6 +137,7 @@ Over `daemon` and `unix://`, iets sends the fields Nix's
 |:---|:---|
 | keep-going | 1 with `--keep-going` or more than one root, else 0 |
 | max-jobs | configured `max-jobs`, overridden by job flags/`--option`; default `auto` (CPU count), 0 forbids local builds |
+| verbosity | the session's selected message level, 0–7; info (3) by default, with classic terminal defaults and flags as in `classic.md` |
 | build verbosity | `lvlVomit`, so builder output arrives as results attributed to their build activity |
 | substitutes | on |
 | cores | configured `cores`, overridden by `--cores`/`--option`; default 0 (all cores) |
@@ -151,6 +152,11 @@ set outside the system nix.conf (`docs/reference/settings.md`).
 Over `ssh-ng://`, iets sends no `SetOptions`, as Nix's `SSHStore` does
 (ssh-store.cc). The remote daemon's own settings apply. nixbuild.net
 rejects the op.
+
+gRPC has no `SetOptions` either. Client-side verbosity does not claim control
+of an SSH or gRPC server's message threshold. The separate build-verbosity
+field stays at `lvlVomit`: reducing message verbosity must not stop delivery
+of builder-log result records.
 
 ### Requests
 
@@ -209,11 +215,14 @@ rejects the op.
 
 ### Events and timings
 
-A daemon's `STDERR_NEXT` is an unattributed log line. A
-`STDERR_START_ACTIVITY` of type `actBuild` maps the activity id to its
+A daemon's `STDERR_NEXT` is an unattributed log line, already filtered by
+the daemon and carrying no level. iets relays it at level 0, as Nix's worker
+client does with `printError`, rather than filtering it again as info.
+A `STDERR_START_ACTIVITY` of type `actBuild` maps the activity id to its
 derivation, and a build log result becomes a log line attributed through
 that map. Under `internal-json`, or with a `json-log-path`, every activity
-message also goes to the log (`docs/reference/errors.md`).
+start, stop and result reaches the log regardless of the selected message
+level (`docs/reference/errors.md`).
 
 `--timings` prints one line per step on stderr: `plan`, `connect`, `query`,
 `resolve` (finding and hashing the missing sources), `substitute` (only when

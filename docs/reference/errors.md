@@ -124,6 +124,31 @@ Some cases differ:
 - A NAR hash mismatch of a fetched tree has code `hash-mismatch` but exits
   1, as the same error does in Nix.
 
+## Verbosity
+
+Each session has its own message threshold: error 0, warning 1, notice 2,
+info 3, talkative 4, chatty 5, debug 6 and vomit 7. A message is visible when
+its level is no greater than the threshold. Errors and failed-build verdicts
+remain visible at 0; stdout results do not depend on verbosity.
+
+Library and native sessions, including eval-jobs, default to info. Classic
+verbosity flags and Nix's terminal-dependent default are described in
+[Classic mode](classic.md). Eval-jobs' `--quiet` remains summary-only;
+`--verbose` and `--debug` change its actual message threshold.
+
+The threshold filters `msg` records on stderr as well as plain messages and
+classic plain activity descriptions. It never filters JSON `start`, `stop`
+or `result` records, including progress, phases and builder logs, or discards
+activity counter state. Consumers such as nom receive complete lifecycles
+even at level 0. Unleveled, already-filtered daemon stderr is relayed at
+level 0 rather than reclassified as info.
+
+The audit destination (`json-log-path`) retains every collected record,
+including messages hidden on stderr. Diagnostic and lint collection is not
+verbosity-filtered: a quiet cache fill still keeps its warnings, and replay
+uses the current invocation's threshold without a different cache identity.
+This cannot recover daemon messages the server never delivered.
+
 ## `--log-format internal-json`
 
 The native commands (`eval`, `build`, `diff`, `eval-jobs`,
@@ -215,10 +240,11 @@ ATTR`. `docs/reference/divergences.md` lists where they differ from Nix.
 
 An id has Nix's form: the pid in the high 32 bits and a counter below.
 These records go out only under `internal-json` or with a `json-log-path`,
-and the text output doesn't change. Under `internal-json` the build renderer
-leaves the builds to them, so there are no start, phase, log or verdict
-lines. The failed build's error record, notes and daemon messages outside a
-build still go out.
+independent of the message threshold. Classic plain activity descriptions
+respect that threshold without dropping activity state. Under `internal-json` the
+build renderer leaves builds to the records, so there are no separate start,
+phase, log or verdict lines. Failed-build error records and already-filtered
+daemon messages still go out at level 0.
 
 ## `sid`: the session
 
@@ -327,9 +353,10 @@ prints the same object from derivation paths instead of an installable, and
 
 The `json-log-path` setting names a file or a unix socket. Set it in
 nix.conf, with `--option json-log-path PATH`, or with
-`--json-log-path PATH`. Every record on this page goes there too, activity
-records included, without the `@nix ` prefix, whatever `--log-format`
-says. stderr does not change.
+`--json-log-path PATH`. Every collected record on this page goes there too,
+activity records included, without the `@nix ` prefix, whatever `--log-format`
+says. This is a full audit stream: messages hidden by stderr's threshold are
+still recorded. It does not change stderr's selected verbosity.
 
 A file is opened for append and created with mode 0644. If the path does
 not open, you get one `error (ignored): opening log file` line, and the run

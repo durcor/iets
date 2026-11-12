@@ -52,6 +52,12 @@ and exit 0.
   `IETS_PROGRESS=false` draws neither, for a log that must not depend on
   how fast a run is.
   Under a Nix name, a pipe gets Nix's `copying path …...` lines instead.
+- **Verbosity.** Native/library sessions start at info (3). Classic names
+  implement ordered verbose, quiet and debug selectors with Nix's defaults
+  (`docs/reference/classic.md`). Errors remain visible at level 0; stdout,
+  JSON activity/progress/build-log records and diagnostic collection are
+  unaffected. `json-log-path` remains a full audit of collected records
+  (`docs/reference/errors.md`).
 - **Exit codes** are in `docs/reference/errors.md`. In short: 0 success,
   1 any error, 2 a usage error of a native command, 100/101/102/104 a
   failed build under `iets build`. `iets diff` follows `diff(1)` instead.
@@ -610,7 +616,7 @@ element that is not an identifier (`names."7zip"`, where 2.35.2 writes
 | `--impure` | identical | Turns off the pure evaluation that `--flake` implies. |
 | `--show-trace` | accepted | The trace is always in the error text. With `--log-format internal-json` it also goes into the error records, as in Nix. |
 | `--option k v` | as for `eval` | `allow-import-from-derivation` and `eval-cache` hold on their own: iets never builds during evaluation (`docs/reference/settings.md`) and has no Nix evaluation cache. `restrict-eval`, the other client settings iets has nothing for, and every store setting (substituters) give one `ignored-setting` warning. |
-| `--quiet`, `--verbose`, `--debug` | `--quiet` only | `--quiet` drops the stderr summary. `--verbose` and `--debug` give one `ignored-flag` warning: iets has one log level. |
+| `--quiet`, `--verbose`, `--debug` | supported, distinct controls | `--quiet` drops only the stderr summary. `--verbose` raises the session's message threshold to at most 7; `--debug` selects 6, in argument order. Workers inherit those selectors. |
 | `--log-format F` | accepted | `internal-json`: stderr is Nix's `@nix {...}` records, with a `code` and a `hint` on each error. `raw`, `raw-with-logs`, `bar`, `bar-with-logs`: plain lines. |
 | `--max-jobs N` | holds | It limits the builds of an import from derivation, and iets never builds during evaluation. |
 | `--provenance` | iets only | Adds a `pos` key to each job: the `file:line:col` of the derivation, mapped back to your local tree (`docs/explanation/provenance.md`). nix-eval-jobs 2.35 has no such key, so the flag is off by default. |
@@ -619,7 +625,7 @@ element that is not an identifier (`names."7zip"`, where 2.35.2 writes
 | `--repair` | error | iets never repairs store paths. |
 
 - stdout: one JSON line per job or error.
-- stderr: the summary line, unless `--quiet`.
+- stderr: diagnostics at the selected verbosity, and the summary unless `--quiet`.
 - Exit: 0 when only jobs fail (their errors are in the job lines); 1 on a
   fatal error, such as a stack overflow.
 

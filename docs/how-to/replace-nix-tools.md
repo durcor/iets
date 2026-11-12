@@ -56,6 +56,13 @@ limits. NH's helper commands, such as Nix version/config queries, may fall
 back to exactly the real Nix package passed as the third argument. Supported
 main builds evaluate natively; unsupported commands retain normal fallback.
 
+NH's `--verbose` now changes the producer's real message threshold; it is
+not an ignored option. Classic verbose/quiet/debug selectors apply in
+argument order. `--quiet` is not `--no-build-output`, and JSON activity,
+progress and builder-log records remain complete for nom even at level 0.
+Errors and failed builds still propagate through the normal pipeline. See
+[Classic verbosity](../reference/classic.md) for defaults and flag ordering.
+
 This expression constructs a package, not a deployment. Install or deploy
 the chosen package separately through your normal configuration workflow;
 it does not update an already installed NH or deploy iets to another host.

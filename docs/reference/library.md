@@ -25,6 +25,7 @@ because a word made up from bits would let a safe call read any address.
 | The state a run owns | `session::Session::new()`, `Session::enter()` ("What the host owns") |
 | Environment settings | `Session::settings()`, `Session::load_settings(&opts)` (docs/reference/settings.md) |
 | Where messages go | `Session::log.write_to(Box<dyn Write + Send>)`, `write_to_stderr()` |
+| Message verbosity | `log::verbosity()`, `set_verbosity(u64)`, `increase_verbosity()`, `decrease_verbosity()` on the entered session; levels 0–7 |
 | Arguments of one evaluation | `api::EvalArgs` (`EvalArgs::new()` for the defaults) |
 | What to evaluate | `api::Input::{Expr, File, Flake}`, `api::ArgKind` for `--arg` |
 | Evaluate it | `api::evaluate(&mut Evaluator, EvalArgs) -> Result<Word, Box<Error>>` |
@@ -86,6 +87,22 @@ started them. For your own threads, call `Session::enter` on each, or use
 `session::bind(f)`. A thread that entered no session uses a fallback session
 that writes nowhere. `docs/how-to/embed-the-evaluator.md` has the steps with
 code.
+
+The log's message threshold belongs to the session too, defaulting to info
+(3); `set_verbosity` clamps to 0–7 and increment/decrement saturate. Bound
+threads share that session's selection, not another evaluator's. Errors at
+level 0 remain visible. JSON lifecycle/progress/build-log records and the
+full audit destination are independent of message visibility
+(`docs/reference/errors.md`). `log::format` and `log::lint` retain complete
+diagnostic text for collectors; use `log::msg` or `log::line` to emit leveled
+messages rather than assuming formatting filters them.
+
+`api::build::Options` (the reexport of `remote::worker::Options`) includes a
+public `verbosity: u64` runtime control. Both `Default` and `TryFrom<&Config>`
+capture the entered session's current threshold. An embedder can select a
+different value on the options before opening a Unix/daemon connection;
+SetOptions clamps it to 0–7. This does not change build-log verbosity, which
+stays at 7, or promise server-side control over SSH/gRPC.
 
 ## Sessions and memory
 

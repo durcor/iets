@@ -116,8 +116,9 @@ you also get a `trace` array, innermost first.
 ## Log destinations
 
 Say you want the records in a file but still want to watch the run.
-`json-log-path` writes every record to a file or a unix socket, without the
-`@nix ` prefix, whatever `--log-format` says. Stderr stays as it was:
+`json-log-path` writes every collected record to a file or a unix socket,
+without the `@nix ` prefix, whatever `--log-format` says. It retains messages
+hidden by stderr's verbosity threshold; stderr keeps its selected level:
 
 ```sh
 iets eval --json-log-path ./log.json -E '{a=1;}.b'
