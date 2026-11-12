@@ -326,7 +326,14 @@ impl Renderer {
             parts.join(" · "),
             fmt_duration(self.began.elapsed())
         );
-        self.print(&[l]);
+        self.print_at(
+            if self.failed_count > 0 {
+                crate::log::LVL_ERROR
+            } else {
+                crate::log::LVL_INFO
+            },
+            &[l],
+        );
     }
 
     /// The held builds that `release` would call a success.
@@ -388,6 +395,20 @@ impl Renderer {
         }
     }
 
+    /// Human status is leveled; builder logs and daemon-approved notes use
+    /// `write` unchanged, and failure blocks must never be classified by text.
+    fn print_at(&mut self, level: u64, lines: &[String]) {
+        if json() {
+            return;
+        }
+        for line in lines {
+            if let Some(text) = crate::log::format_at(level, line) {
+                let _ = writeln!(self.out, "{text}");
+            }
+        }
+        let _ = self.out.flush();
+    }
+
     fn write(&mut self, lines: &[String]) {
         for l in lines {
             let _ = writeln!(
@@ -400,12 +421,19 @@ impl Renderer {
     }
 
     fn line(&mut self, l: String) {
-        self.print(&[l]);
+        self.print_at(crate::log::LVL_INFO, &[l]);
     }
 
-    /// One line, outside any build: a plan note, a daemon message.
+    fn error_line(&mut self, line: String) {
+        self.print_at(crate::log::LVL_ERROR, &[line]);
+    }
+
+    /// An already-filtered daemon line, relayed as Nix's `printError` does.
     pub fn note(&mut self, msg: &str) {
-        self.write(&[msg.to_string()]);
+        if let Some(text) = crate::log::format_at(crate::log::LVL_ERROR, msg) {
+            let _ = writeln!(self.out, "{text}");
+        }
+        let _ = self.out.flush();
     }
 
     pub fn event(&mut self, e: &BuildEvent) {
@@ -495,7 +523,7 @@ impl Renderer {
                 if daemon {
                     self.note(&text);
                 } else if !self.style.quiet {
-                    self.line(text);
+                    self.print(&[text]);
                 }
                 return;
             }
@@ -512,7 +540,7 @@ impl Renderer {
         if b.streaming {
             let prefix = b.short.clone();
             let l = self.sgr(DIM, &format!("{prefix}>"));
-            self.line(format!("{l} {text}"));
+            self.print(&[format!("{l} {text}")]);
         }
     }
 
@@ -620,7 +648,7 @@ impl Renderer {
                 self.tally(false);
                 let l =
                     self.failed_line(&short_label(&e.attr), e.pos.as_deref(), e.elapsed, reason);
-                self.line(l);
+                self.error_line(l);
             }
             None => {}
         }
@@ -648,7 +676,7 @@ impl Renderer {
                     e.elapsed,
                     Some(reason),
                 );
-                self.line(l);
+                self.error_line(l);
             }
             return;
         }
@@ -704,7 +732,11 @@ impl Renderer {
             return;
         }
         if self.style.quiet || (ok && self.style.mode == Mode::Tty) {
-            self.line(verdict);
+            if ok {
+                self.line(verdict);
+            } else {
+                self.error_line(verdict);
+            }
             return;
         }
         if self.style.mode == Mode::Tty {
@@ -723,16 +755,21 @@ impl Renderer {
                 .collect()
         };
         let mut out = Vec::with_capacity(body.len() + 3);
-        if ok && self.style.fold {
+        let show_verdict = !ok || crate::log::enabled(crate::log::LVL_INFO);
+        if !show_verdict {
+            // Keep the full audit record even when only the build log is shown.
+            let _ = crate::log::format_at(crate::log::LVL_INFO, &verdict);
+        }
+        if ok && self.style.fold && show_verdict {
             out.push(format!("::group::{verdict}"));
             out.extend(body);
             out.push("::endgroup::".into());
         } else if ok {
-            // the verdict closes the block: a build that has printed a ✔ must
-            // not keep talking. Folding needs it first, and so does a failure,
-            // whose head is what a reader scrolls back to.
+            // A success verdict closes its log block, when it is visible.
             out.extend(body);
-            out.push(verdict);
+            if show_verdict {
+                out.push(verdict);
+            }
         } else {
             let dropped = if b.dropped {
                 format!(" (oldest lines dropped, buffer={BUFFER_LINES})")
@@ -968,6 +1005,73 @@ pub(super) mod tests {
 
     fn ev(kind: Kind) -> BuildEvent {
         BuildEvent::new("checks.x.a", "/nix/store/a.drv", kind, Duration::ZERO)
+    }
+
+    #[test]
+    fn quiet_hides_status_but_preserves_builder_logs_and_failure_verdicts() {
+        let session = Session::new();
+        let _entered = session.enter();
+        crate::log::set_verbosity(0);
+        let (mut r, s) = ci(false);
+        r.event(&ev(Kind::Started));
+        r.event(&ev(Kind::Log(b"builder output".to_vec())));
+        r.event(&ev(Kind::Built {
+            outputs: BTreeMap::new(),
+        }));
+        let success = text(&s);
+        assert!(
+            !success.contains("▶ building") && !success.contains("✔"),
+            "{success}"
+        );
+        assert!(success.contains("builder output"), "{success}");
+
+        let (mut r, s) = ci(false);
+        r.event(&ev(Kind::Started));
+        r.event(&ev(Kind::Log(b"failure context".to_vec())));
+        r.event(&ev(Kind::Failed {
+            reason: "builder exited 7".into(),
+            log_tail: vec![],
+        }));
+        r.finish();
+        let failure = text(&s);
+        assert!(
+            failure.contains("✘  checks.x.a failed") && failure.contains("builder exited 7"),
+            "{failure}"
+        );
+        assert!(failure.contains("failure context"), "{failure}");
+    }
+
+    #[test]
+    fn quiet_relay_keeps_daemon_approved_messages_without_a_level() {
+        let session = Session::new();
+        let _entered = session.enter();
+        crate::log::set_verbosity(0);
+        let (mut r, s) = ci(false);
+        r.note("server-approved diagnostic");
+        assert_eq!(text(&s), "server-approved diagnostic\n");
+        crate::log::set_format("internal-json").unwrap();
+        r.note("another daemon message");
+        let raw = String::from_utf8(s.0.lock().unwrap().clone()).unwrap();
+        let record = raw.lines().last().unwrap().strip_prefix("@nix ").unwrap();
+        let v: serde_json::Value = serde_json::from_str(record).unwrap();
+        assert_eq!(v["msg"], "another daemon message");
+        assert_eq!(v["level"], 0);
+    }
+
+    #[test]
+    fn quiet_does_not_filter_late_or_streaming_builder_log_bytes() {
+        let session = Session::new();
+        let _entered = session.enter();
+        crate::log::set_verbosity(0);
+        let (mut r, s) = ci(false);
+        r.event(&ev(Kind::Log(b"late builder output".to_vec())));
+        r.event(&ev(Kind::Started));
+        r.running.get_mut("/nix/store/a.drv").unwrap().streaming = true;
+        r.event(&ev(Kind::Log(b"live builder output".to_vec())));
+        let text = text(&s);
+        assert!(text.contains("late builder output"), "{text}");
+        assert!(text.contains("live builder output"), "{text}");
+        assert!(!text.contains("▶ building"), "{text}");
     }
 
     #[test]

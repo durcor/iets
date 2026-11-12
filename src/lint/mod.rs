@@ -841,8 +841,10 @@ impl Lints {
         }
         g.counted.extend(tree.map(String::from));
         let (shown, record) = log::lint(line, site);
-        g.pending.extend_from_slice(shown.as_bytes());
-        g.pending.push(b'\n');
+        if log::enabled(log::LVL_WARN) {
+            g.pending.extend_from_slice(shown.as_bytes());
+            g.pending.push(b'\n');
+        }
         g.records.push(record);
         if g.pending.len() >= FLUSH_AT {
             g.flush();
@@ -1113,6 +1115,22 @@ mod flake_cases;
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn quiet_collection_preserves_cache_records_without_queuing_stderr() {
+        let session = Session::new();
+        let _entered = session.enter();
+        log::set_verbosity(0);
+        let mut lints = Lints::default();
+        let line = "warning: [url-literal] URL literal";
+        assert!(lints.record(LintId::UrlLiteral, Pos::NONE, line, None, None));
+        assert!(lints.shared.lock().unwrap().pending.is_empty());
+        let records = lints.records();
+        assert_eq!(records.len(), 1);
+        assert!(log::replay_lints(records[0].as_bytes()).is_empty());
+        log::set_verbosity(1);
+        assert_eq!(log::replay_lints(records[0].as_bytes()), format!("{line}\n").as_bytes());
+    }
 
     /// A `/tmp/iets.toml` must not set a lint level for a project below it:
     /// the walk stops at the root, and the file is untrusted input.

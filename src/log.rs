@@ -1,8 +1,8 @@
 //! Everything a command says on stderr goes through here: Nix's plain text,
 //! or with `--log-format internal-json` one `@nix {...}` line per message in
 //! the format of logging.cc:JSONLogger, plus `code` and `hint` on an error
-//! (docs/reference/errors.md). The `json-log-path` file gets every record in either
-//! format.
+//! (docs/reference/errors.md). Message visibility uses the session threshold;
+//! lifecycle records and the full `json-log-path` audit stream do not.
 //!
 //! The state is a [`Log`], which a [`crate::session::Session`] owns: the
 //! functions here act on the one this thread entered.
@@ -28,9 +28,9 @@ use crate::sys::fs::{create_mode, is_socket};
 use crate::{config, error};
 
 /// Where one session's messages go and what it saw on the way.
-#[derive(Default)]
 pub struct Log {
     json: AtomicBool,
+    verbosity: AtomicU64,
     show_trace: AtomicBool,
     /// Under one of Nix's names stderr holds what Nix prints and nothing else.
     classic: AtomicBool,
@@ -47,6 +47,26 @@ pub struct Log {
     /// unless the host asked for it. `iets` points it at stderr.
     err: Mutex<Out>,
     pub progress: Board,
+}
+
+impl Default for Log {
+    fn default() -> Self {
+        Self {
+            json: AtomicBool::new(false),
+            verbosity: AtomicU64::new(LVL_INFO),
+            show_trace: AtomicBool::new(false),
+            classic: AtomicBool::new(false),
+            json_log_path: OnceLock::new(),
+            sink: OnceLock::new(),
+            sid: OnceLock::new(),
+            next_activity: AtomicU64::new(0),
+            mismatches: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
+            want_mismatch: Mutex::new(None),
+            err: Mutex::new(Out::default()),
+            progress: Board::default(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -270,6 +290,42 @@ impl Write for SessionOut {
     }
 }
 
+/// The message threshold of this thread's session (error 0 through vomit 7).
+pub fn verbosity() -> u64 {
+    cur().log.verbosity.load(Ordering::Relaxed)
+}
+
+pub fn set_verbosity(level: u64) {
+    cur()
+        .log
+        .verbosity
+        .store(level.min(LVL_VOMIT), Ordering::Relaxed);
+}
+
+pub fn increase_verbosity() {
+    let _ = cur()
+        .log
+        .verbosity
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |level| {
+            (level < LVL_VOMIT).then_some(level + 1)
+        });
+}
+
+pub fn decrease_verbosity() {
+    let _ = cur()
+        .log
+        .verbosity
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |level| {
+            level.checked_sub(1)
+        });
+}
+
+/// Whether a leveled message is visible; raw relays and activity records are
+/// independent of this threshold.
+pub fn enabled(level: u64) -> bool {
+    level <= verbosity()
+}
+
 /// `--log-format F`, loggers.cc:parseLogFormat. Every format but
 /// `internal-json` is plain text here.
 pub fn set_format(f: &str) -> Result<(), String> {
@@ -411,10 +467,14 @@ pub(crate) fn open_sink(path: &Path) -> io::Result<Box<dyn Write + Send>> {
 impl Log {
     /// One record: `v` under internal-json, else `text` if any.
     fn out(&self, v: &Value, text: Option<&str>) {
-        if self.json.load(Ordering::Relaxed) {
-            self.errln(&format!("@nix {}", self.wire(v)));
-        } else if let Some(t) = text {
-            self.errln(&filter_ansi(t, !stderr_is_tty()));
+        let visible = v["action"] != "msg"
+            || v["level"].as_u64().unwrap_or(LVL_ERROR) <= self.verbosity.load(Ordering::Relaxed);
+        if visible {
+            if self.json.load(Ordering::Relaxed) {
+                self.errln(&format!("@nix {}", self.wire(v)));
+            } else if let Some(t) = text {
+                self.errln(&filter_ansi(t, !stderr_is_tty()));
+            }
         }
         self.tee(v);
     }
@@ -427,8 +487,13 @@ fn out(v: &Value, text: Option<&str>) {
 /// error.hh:Verbosity, and logging.hh:ActivityType and ResultType, the ones
 /// iets emits itself.
 pub const LVL_ERROR: u64 = 0;
+pub const LVL_WARN: u64 = 1;
+pub const LVL_NOTICE: u64 = 2;
 pub const LVL_INFO: u64 = 3;
 pub const LVL_TALKATIVE: u64 = 4;
+pub const LVL_CHATTY: u64 = 5;
+pub const LVL_DEBUG: u64 = 6;
+pub const LVL_VOMIT: u64 = 7;
 pub const ACT_UNKNOWN: u64 = 0;
 pub const ACT_COPY_PATH: u64 = 100;
 pub const ACT_FILE_TRANSFER: u64 = 101;
@@ -577,24 +642,60 @@ impl Drop for Activity {
     }
 }
 
-/// `text` as it goes to stderr, without the newline: itself, or a `msg`
-/// record at the verbosity its prefix implies.
+/// Formats and audits a message without filtering it. Diagnostic collectors
+/// and build-log renderers need the complete text even when it is not shown.
+/// User-visible leveled emissions use `msg` or `line` instead.
 pub fn format(text: &str) -> String {
-    // the daemon's own messages arrive coloured, and the prefix is what says
-    // how severe they are
-    let plain = strip_ansi(text);
-    let level = if plain.starts_with("error:") || plain.starts_with("trace:") {
-        0
-    } else if plain.starts_with("warning:") || plain.starts_with("evaluation warning:") {
-        1
-    } else {
-        3
-    };
-    let v = json!({"action": "msg", "level": level, "msg": text});
+    let v = json!({"action": "msg", "level": text_level(text), "msg": text});
     cur().log.render(&v, text)
 }
 
+fn text_level(text: &str) -> u64 {
+    // Only coloured prefixes need a temporary plain copy.
+    let plain;
+    let text = if text.as_bytes().contains(&0x1b) {
+        plain = strip_ansi(text);
+        plain.as_str()
+    } else {
+        text
+    };
+    if text.starts_with("error:") || text.starts_with("trace:") {
+        LVL_ERROR
+    } else if text.starts_with("warning:") || text.starts_with("evaluation warning:") {
+        LVL_WARN
+    } else {
+        LVL_INFO
+    }
+}
+
+/// A typed human line for renderers. Suppressed lines still reach the audit
+/// sink; `None` must not become an empty line on stderr.
+pub(crate) fn format_at(level: u64, text: &str) -> Option<String> {
+    cur().log.format_at(level, text)
+}
+
 impl Log {
+    fn format_at(&self, level: u64, text: &str) -> Option<String> {
+        let visible = level <= self.verbosity.load(Ordering::Relaxed);
+        let json = self.json.load(Ordering::Relaxed);
+        let audit = self.sink().is_some();
+        if !visible && !audit {
+            return None;
+        }
+        if !json && !audit {
+            return Some(filter_ansi(text, !stderr_is_tty()));
+        }
+        let v = json!({"action": "msg", "level": level, "msg": text});
+        self.tee(&v);
+        visible.then(|| {
+            if json {
+                format!("@nix {}", self.wire(&v))
+            } else {
+                filter_ansi(text, !stderr_is_tty())
+            }
+        })
+    }
+
     /// `v` as an `@nix` line under internal-json, else `text`; either way
     /// the `json-log-path` file gets the record.
     fn render(&self, v: &Value, text: &str) -> String {
@@ -609,15 +710,24 @@ impl Log {
 
 /// logging.cc:JSONLogger::log: `text` at `level`, whatever its prefix.
 pub fn msg(level: u8, text: &str) {
-    out(
-        &json!({"action": "msg", "level": level, "msg": text}),
-        Some(text),
-    );
+    let s = cur();
+    if let Some(text) = s.log.format_at(u64::from(level), text) {
+        s.log.errln(&text);
+    }
 }
 
-/// A line that is not an error record.
+/// A leveled message, with severity inferred from its diagnostic prefix.
 pub fn line(text: &str) {
-    cur().log.errln(&on_stderr(&format(text)));
+    let s = cur();
+    if let Some(text) = s.log.format_at(text_level(text), text) {
+        s.log.errln(&text);
+    }
+}
+
+/// An already-approved daemon line or builder output, with no client-side
+/// level. Nix's worker client relays `STDERR_NEXT` with `printError`, not Info.
+pub fn relay(text: &str) {
+    msg(LVL_ERROR as u8, text);
 }
 
 fn stderr_is_tty() -> bool {
@@ -666,8 +776,16 @@ pub fn replay_lints(bytes: &[u8]) -> Vec<u8> {
         .map(serde_json::from_str::<Value>)
     {
         let Ok(v) = v else { continue };
-        out.push_str(&s.log.render(&v, v["msg"].as_str().unwrap_or_default()));
-        out.push('\n');
+        s.log.tee(&v);
+        if v["level"].as_u64().unwrap_or(LVL_WARN) <= s.log.verbosity.load(Ordering::Relaxed) {
+            if s.log.json.load(Ordering::Relaxed) {
+                out.push_str("@nix ");
+                out.push_str(&s.log.wire(&v));
+            } else {
+                out.push_str(&filter_ansi(v["msg"].as_str().unwrap_or_default(), !stderr_is_tty()));
+            }
+            out.push('\n');
+        }
     }
     out.into_bytes()
 }
@@ -1153,6 +1271,219 @@ mod tests {
 
     use crate::display::Size;
     use crate::display::tests::Emu;
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Capture {
+        fn take(&self) -> String {
+            String::from_utf8(mem::take(&mut *self.0.lock().unwrap())).unwrap()
+        }
+    }
+
+    fn captured() -> (Arc<Session>, Capture) {
+        let s = Session::new();
+        let out = Capture::default();
+        s.log.write_to(Box::new(out.clone()));
+        (s, out)
+    }
+
+    #[test]
+    fn evaluation_warning_visibility_does_not_change_trace_errors_or_stdout_results() {
+        use crate::api::{self, EvalArgs, Input};
+        use crate::eval::EvalConfig;
+
+        for threshold in [0, 1] {
+            let (s, stderr) = captured();
+            let _entered = s.enter();
+            set_verbosity(threshold);
+            let stdout = Capture::default();
+            s.out.write_to(Box::new(stdout.clone()));
+            let mut ev = EvalConfig::new().session(s.clone()).build();
+            let args = |expr: &str| EvalArgs {
+                input: Some(Input::Expr(expr.into())),
+                no_ir_cache: true,
+                no_tracing_cache: true,
+                workers: 1,
+                ..EvalArgs::new()
+            };
+            let value = api::evaluate(
+                &mut ev,
+                args(r#"builtins.trace "trace-visible" (builtins.warn "warning-threshold" 42)"#),
+            )
+            .unwrap();
+            let mut output = s.out.writer();
+            crate::print::print_json(&mut ev, value, &mut output, &mut Vec::new(), true, Pos::NONE)
+                .unwrap();
+            assert_eq!(stdout.take(), "42");
+            let text = stderr.take();
+            assert!(text.contains("trace: trace-visible"), "{text}");
+            assert_eq!(
+                text.contains("evaluation warning: warning-threshold"),
+                threshold >= 1
+            );
+            let error = api::evaluate(&mut ev, args(r#"throw "evaluation-failure""#)).unwrap_err();
+            Report::eval(
+                &error,
+                "evaluation-failure",
+                &|_| String::new(),
+                &str::to_string,
+            )
+            .emit();
+            assert!(stderr.take().contains("error: evaluation-failure"));
+            assert!(stdout.take().is_empty());
+        }
+    }
+
+    #[test]
+    fn every_message_boundary_filters_plain_and_json_but_not_the_audit() {
+        for json in [false, true] {
+            let (s, shown) = captured();
+            let _entered = s.enter();
+            let audit = Capture::default();
+            assert!(
+                s.log
+                    .sink
+                    .set(Some(Mutex::new(Box::new(audit.clone()))))
+                    .is_ok()
+            );
+            s.log.json.store(json, Ordering::Relaxed);
+            for threshold in 0..=7 {
+                set_verbosity(threshold);
+                for level in 0..=7 {
+                    msg(level, &format!("message-{level}"));
+                }
+                let text = shown.take();
+                assert_eq!(text.lines().count(), threshold as usize + 1, "{text}");
+                for level in 0..=7 {
+                    assert_eq!(
+                        text.contains(&format!("message-{level}")),
+                        level <= threshold
+                    );
+                }
+                let records = audit.take();
+                assert_eq!(records.lines().count(), 8);
+                for record in records.lines() {
+                    let v: Value = serde_json::from_str(record).unwrap();
+                    assert_eq!(v["sid"], session_id());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn level_changes_saturate_in_order_and_bound_threads_share_only_their_session() {
+        let (a, out_a) = captured();
+        let (b, out_b) = captured();
+        let _entered = a.enter();
+        msg(3, "default info");
+        msg(4, "hidden talkative");
+        set_verbosity(u64::MAX);
+        increase_verbosity();
+        assert_eq!(verbosity(), 7);
+        msg(7, "saturated high");
+        set_verbosity(0);
+        decrease_verbosity();
+        msg(1, "hidden warning");
+        std::thread::spawn(crate::session::bind(|| {
+            increase_verbosity();
+            msg(1, "thread warning");
+        }))
+        .join()
+        .unwrap();
+        assert_eq!(verbosity(), 1);
+        {
+            let _entered = b.enter();
+            msg(3, "independent info");
+            set_verbosity(6);
+            decrease_verbosity();
+            increase_verbosity();
+            msg(6, "ordered debug");
+            msg(7, "hidden vomit");
+        }
+        msg(2, "still hidden notice");
+        assert_eq!(out_a.take(), "default info\nsaturated high\nthread warning\n");
+        assert_eq!(out_b.take(), "independent info\nordered debug\n");
+    }
+
+    #[test]
+    fn quiet_json_keeps_lifecycle_progress_build_logs_and_error_fields() {
+        let (s, shown) = captured();
+        let _entered = s.enter();
+        set_format("internal-json").unwrap();
+        set_verbosity(0);
+        let parent = Activity::new(LVL_VOMIT, ACT_BUILDS, "builds", vec![]);
+        let child = Activity::under(
+            parent.0,
+            LVL_VOMIT,
+            ACT_BUILD,
+            "build",
+            vec!["x.drv".into()],
+        );
+        child.result(RES_PROGRESS, vec![1.into(), 2.into(), 1.into(), 0.into()]);
+        child.result(RES_BUILD_LOG_LINE, vec!["builder stdout".into()]);
+        let (parent_id, child_id) = (parent.0, child.0);
+        drop(child);
+        drop(parent);
+        warning("quiet-warning", "not visible".into());
+        Report {
+            hint: Some("repair the input".into()),
+            ..Report::new("unsupported", "failure without a prefix")
+        }
+        .emit();
+        let text = shown.take();
+        let records: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line.strip_prefix("@nix ").unwrap()).unwrap())
+            .collect();
+        assert_eq!(records.len(), 7, "{text}");
+        assert_eq!(records[0]["id"], parent_id);
+        assert_eq!(records[1]["parent"], parent_id);
+        assert_eq!(records[2]["id"], child_id);
+        assert_eq!(records[2]["fields"], json!([1, 2, 1, 0]));
+        assert_eq!(records[3]["fields"], json!(["builder stdout"]));
+        assert_eq!(records[4]["action"], "stop");
+        assert_eq!(records[4]["id"], child_id);
+        assert_eq!(records[5]["id"], parent_id);
+        assert_eq!(records[6]["level"], 0);
+        assert_eq!(records[6]["code"], "unsupported");
+        assert_eq!(records[6]["hint"], "repair the input");
+        assert!(records.iter().all(|v| v["sid"] == session_id()));
+    }
+
+    #[test]
+    fn hidden_diagnostics_still_format_and_replay_at_the_current_level() {
+        let (s, shown) = captured();
+        let _entered = s.enter();
+        set_verbosity(0);
+        let text = "warning: [url-literal] use a string";
+        let (formatted, record) = lint(text, None);
+        assert_eq!(formatted, text);
+        assert_eq!(format("warning: collected"), "warning: collected");
+        assert!(replay_lints(record.as_bytes()).is_empty());
+        set_verbosity(1);
+        assert_eq!(replay_lints(record.as_bytes()), format!("{text}\n").as_bytes());
+        set_verbosity(0);
+        assert!(replay_lints(record.as_bytes()).is_empty());
+        line("warning: hidden");
+        line("\x1b[31merror:\x1b[0m visible");
+        relay("daemon-approved message without a level");
+        assert_eq!(
+            shown.take(),
+            "error: visible\ndaemon-approved message without a level\n"
+        );
+    }
 
     /// A terminal of a given size, and the screen what is written shows.
     #[derive(Clone)]

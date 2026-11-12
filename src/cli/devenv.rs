@@ -181,7 +181,7 @@ impl EventSink {
             Event::Log(l) => {
                 let line = self.prov.rewrite_str(&String::from_utf8_lossy(&l.line));
                 if self.live {
-                    log::line(&format!("iets: {line}"));
+                    log::relay(&format!("iets: {line}"));
                 } else {
                     self.log.push(line);
                 }
@@ -206,7 +206,7 @@ impl EventSink {
 
     fn dump(&self) {
         for l in &self.log {
-            log::line(&format!("iets: {l}"));
+            log::relay(&format!("iets: {l}"));
         }
     }
 }

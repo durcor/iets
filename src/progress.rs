@@ -16,7 +16,7 @@ use crate::build::event::fmt_duration;
 use crate::build::render;
 use crate::log::{
     self, ACT_BUILD, ACT_BUILDS, ACT_COPY_PATH, ACT_COPY_PATHS, ACT_FETCH_TREE, ACT_FILE_TRANSFER,
-    ACT_QUERY_PATH_INFO, ACT_REALISE, ACT_SUBSTITUTE, LVL_INFO,
+    ACT_QUERY_PATH_INFO, ACT_REALISE, ACT_SUBSTITUTE,
 };
 use crate::session::{self, Session};
 use crate::store::path::find_store_prefix;
@@ -123,7 +123,7 @@ impl Board {
             spawn_ticker();
         }
         let classic = self.mode() == Mode::Lines && log::classic();
-        (classic && lvl <= LVL_INFO && !text.is_empty() && !is_build(ty))
+        (classic && log::enabled(lvl) && !text.is_empty() && !is_build(ty))
             .then(|| format!("{text}..."))
     }
 
@@ -409,6 +409,42 @@ mod tests {
             detail: String::new(),
             told: false,
         }
+    }
+
+    #[test]
+    fn classic_text_obeys_the_level_without_discarding_progress_state() {
+        let session = Session::new();
+        let _entered = session.enter();
+        log::set_classic();
+        let b = &session.log.progress;
+        b.set_mode(Mode::Lines);
+        // No ticker is needed to inspect the state synchronously.
+        b.lock().ticking = true;
+        log::set_verbosity(0);
+        assert!(
+            b.start(1, log::LVL_TALKATIVE, ACT_FILE_TRANSFER, "download", 0)
+                .is_none()
+        );
+        b.result(1, log::RES_PROGRESS, &[10.into(), 20.into(), 1.into(), 0.into()]);
+        {
+            let t = b.lock();
+            assert_eq!(t.all[&1].done, 10);
+            assert_eq!(t.all[&1].expected, 20);
+        }
+        log::set_verbosity(log::LVL_TALKATIVE);
+        assert_eq!(
+            b.start(2, log::LVL_TALKATIVE, ACT_FETCH_TREE, "fetch", 1),
+            Some("fetch...".into())
+        );
+        log::set_verbosity(0);
+        assert_eq!(
+            b.start(3, log::LVL_ERROR, ACT_FETCH_TREE, "failure context", 0),
+            Some("failure context...".into())
+        );
+        assert!(!b.stop(1));
+        assert!(!b.stop(2));
+        assert!(b.stop(3));
+        assert!(b.lock().all.is_empty());
     }
 
     #[test]

@@ -412,7 +412,7 @@ fn substitute(ev: &mut Evaluator, store_path: &str) -> bool {
     // the daemon's own lines, such as a substituter it retries
     let mut said = |e: event::Event| {
         if let event::Event::Log(l) = e {
-            log::line(&String::from_utf8_lossy(&l.line));
+            log::relay(&String::from_utf8_lossy(&l.line));
         }
     };
     match conn.substitute_paths(slice::from_ref(&store_path.to_string()), &mut said) {
@@ -1121,7 +1121,7 @@ fn relay(from: impl Read, act: &Activity, keep_errors: bool) -> String {
                     said.push('\n');
                     continue;
                 }
-                log::line(msg);
+                log::msg(n("level").min(log::LVL_VOMIT) as u8, msg);
                 said.push_str(msg);
                 said.push('\n');
             }
@@ -1144,6 +1144,44 @@ mod tests {
 
     use IngestionMethod::{Flat, Recursive};
     use trace::Kind::{Directory, Regular};
+
+    #[test]
+    fn child_messages_keep_their_level_and_lifecycle_even_when_quiet() {
+        let dir = tempdir().unwrap();
+        let stderr = dir.path().join("stderr");
+        let session = Session::new();
+        let _entered = session.enter();
+        session
+            .log
+            .write_to(Box::new(fs::File::create(&stderr).unwrap()));
+        log::set_verbosity(0);
+        log::set_format("internal-json").unwrap();
+        let act = Activity::new(log::LVL_INFO, log::ACT_FETCH_TREE, "fetch", vec![]);
+        let input = concat!(
+            "@nix {\"action\":\"start\",\"id\":42,\"level\":7,\"type\":101,\"parent\":0,\"text\":\"download\"}\n",
+            "@nix {\"action\":\"msg\",\"level\":6,\"msg\":\"warning: actually debug\"}\n",
+            "@nix {\"action\":\"msg\",\"level\":0,\"msg\":\"unprefixed child failure\"}\n",
+            "@nix {\"action\":\"result\",\"id\":42,\"type\":105,\"fields\":[1,2,1,0]}\n",
+            "@nix {\"action\":\"stop\",\"id\":42}\n",
+        );
+        let collected = relay(input.as_bytes(), &act, false);
+        assert!(collected.contains("warning: actually debug"));
+        let text = fs::read_to_string(&stderr).unwrap();
+        let records: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line.strip_prefix("@nix ").unwrap()).unwrap())
+            .collect();
+        assert!(!text.contains("warning: actually debug"), "{text}");
+        let failure = records
+            .iter()
+            .find(|v| v["msg"] == "unprefixed child failure")
+            .unwrap();
+        assert_eq!(failure["level"], 0);
+        let start = records.iter().find(|v| v["text"] == "download").unwrap();
+        assert_eq!(start["parent"], act.0);
+        assert!(records.iter().any(|v| v["action"] == "result" && v["id"] == start["id"]));
+        assert!(records.iter().any(|v| v["action"] == "stop" && v["id"] == start["id"]));
+    }
 
     #[test]
     fn locked_path_metadata_must_describe_the_expected_source() {

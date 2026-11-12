@@ -53,6 +53,74 @@ fn build(s: &Store, args: &[&str]) -> Output {
     o
 }
 
+/// A real daemon's message policy, not a protocol echo: a debug session sees
+/// the local file-cache miss diagnostics, while an error-only session does
+/// the same query without those messages. No builds or network are involved.
+#[test]
+fn selected_session_verbosity_controls_real_daemon_messages() {
+    use iets::config::Config;
+    use iets::log;
+    use iets::remote::event::Event;
+    use iets::remote::worker::{Connection, Options, Transport};
+    use iets::session::Session;
+
+    let s = store!();
+    let cache = s.dir().join("empty-cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(
+        cache.join("nix-cache-info"),
+        format!(
+            "StoreDir: {}\nWantMassQuery: 1\nPriority: 40\n",
+            s.store_dir().display()
+        ),
+    )
+    .unwrap();
+    let missing = format!(
+        "{}/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-verbosity-missing",
+        s.store_dir().display()
+    );
+    let query = |level, from_config| {
+        let session = Session::new();
+        let _entered = session.enter();
+        log::set_verbosity(level);
+        let mut options = if from_config {
+            Options::try_from(&Config::empty()).unwrap()
+        } else {
+            Options::default()
+        };
+        options.overrides = vec![
+            ("substituters".into(), format!("file://{}", cache.display())),
+            ("builders".into(), String::new()),
+            ("narinfo-cache-negative-ttl".into(), "0".into()),
+        ];
+        let mut connection =
+            Connection::open_with(&Transport::Unix(s.socket()), &options, &mut |_| {}).unwrap();
+        let mut messages = Vec::new();
+        let valid = connection
+            .substitute_paths(std::slice::from_ref(&missing), &mut |event| {
+                if let Event::Log(line) = event {
+                    messages.push(line.line);
+                }
+            })
+            .unwrap();
+        assert!(valid.is_empty());
+        messages
+    };
+    for from_config in [false, true] {
+        let quiet = query(0, from_config);
+        let debug = query(6, from_config);
+        assert!(quiet.is_empty(), "unexpected quiet daemon messages: {quiet:?}");
+        assert!(
+            !debug.is_empty(),
+            "the daemon must emit debug diagnostics for the cache query"
+        );
+        assert!(
+            query(0, from_config).is_empty(),
+            "a new quiet session must not inherit debug"
+        );
+    }
+}
+
 /// Instantiates `case`, records what Nix made, deletes it, builds through
 /// `url` and checks that iets registered the same bytes.
 fn run_custom(s: &Store, case: &str, url: &str, env: &[(&str, &str)]) {

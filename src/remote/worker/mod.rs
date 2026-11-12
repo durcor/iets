@@ -21,16 +21,18 @@ use super::path_info::PathInfo;
 use crate::config::{self, Config};
 use crate::error::{self, Error, Result};
 use crate::log::{
-    self, ACT_BUILD, ACT_BUILDS, LVL_INFO, RES_BUILD_LOG_LINE, RES_PROGRESS, RES_SET_PHASE,
+    self, ACT_BUILD, ACT_BUILDS, LVL_VOMIT, RES_BUILD_LOG_LINE, RES_PROGRESS, RES_SET_PHASE,
 };
 use crate::store::path::{StorePath, check_name};
 use wire::{Counting, FramedSink};
 
-/// What `SetOptions` sends (remote-store.cc:setOptions). `Default` is the
-/// built-in set; `TryFrom<&Config>` takes the values from the user's nix.conf
-/// instead, and fails the way Nix does on a bad setting value.
+/// What `SetOptions` sends (remote-store.cc:setOptions). Both constructors
+/// capture the session's message threshold. `Default` uses built-in store
+/// settings; `TryFrom<&Config>` reads and validates those from nix.conf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
+    /// The daemon's message threshold, captured from the entered session.
+    pub verbosity: u64,
     /// `0` would forbid local builds, so the default is the CPU count, what
     /// `max-jobs = auto` gives.
     pub max_jobs: u64,
@@ -50,6 +52,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Options {
         Options {
+            verbosity: log::verbosity(),
             max_jobs: thread::available_parallelism().map_or(1, |n| n.get() as u64),
             cores: 0,
             keep_going: false,
@@ -67,6 +70,7 @@ impl TryFrom<&Config> for Options {
 
     fn try_from(c: &Config) -> Result<Options> {
         Ok(Options {
+            verbosity: log::verbosity(),
             max_jobs: c.max_jobs()?,
             cores: c.cores()?,
             keep_going: c.keep_going()?,
@@ -114,9 +118,6 @@ enum Op {
 
 /// logging.hh:resPostBuildLogLine.
 const RES_POST_BUILD_LOG_LINE: u64 = 107;
-
-/// error.hh:Verbosity.
-const LVL_VOMIT: u64 = 7;
 
 const DEFAULT_SOCKET: &str = "/nix/var/nix/daemon-socket/socket";
 
@@ -749,18 +750,18 @@ impl Connection {
     fn set_options(&mut self, o: &Options, on_event: &mut dyn FnMut(Event)) -> Result<()> {
         self.op(Op::SetOptions)?;
         for v in [
-            o.keep_failed.into(),  // keep-failed
-            o.keep_going.into(),   // keep-going
-            o.try_fallback.into(), // try-fallback
-            LVL_INFO,              // verbosity
-            o.max_jobs,            // max-jobs
-            o.max_silent_time,     // max-silent-time
-            1,                     // obsolete use-build-hook
-            LVL_VOMIT,             // build verbosity: lvlVomit means verboseBuild = false
-            0,                     // obsolete log type
-            0,                     // obsolete print build trace
-            o.cores,               // cores
-            o.substitutes.into(),  // substitute
+            o.keep_failed.into(),       // keep-failed
+            o.keep_going.into(),        // keep-going
+            o.try_fallback.into(),      // try-fallback
+            o.verbosity.min(LVL_VOMIT),  // verbosity
+            o.max_jobs,                 // max-jobs
+            o.max_silent_time,          // max-silent-time
+            1,                          // obsolete use-build-hook
+            LVL_VOMIT,                  // build verbosity: lvlVomit means verboseBuild = false
+            0,                          // obsolete log type
+            0,                          // obsolete print build trace
+            o.cores,                    // cores
+            o.substitutes.into(),       // substitute
         ] {
             write_u64(self.w(), v)?;
         }
@@ -783,6 +784,8 @@ impl Connection {
                     return Ok(());
                 }
                 STDERR_NEXT => {
+                    // No level travels with this already-filtered daemon text.
+                    // Consumers relay it as Nix's client does with printError.
                     let mut line = read_bytes(self.r(), wire::MAX_STRING)?;
                     while line.last() == Some(&b'\n') {
                         line.pop();
@@ -1274,6 +1277,96 @@ mod tests {
     }
 
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn connection(input: Vec<u8>, output: Captured) -> Connection {
+        Connection {
+            to: BufWriter::new(Counting {
+                inner: Box::new(output),
+                bytes: 0,
+            }),
+            from: BufReader::new(Box::new(io::Cursor::new(input))),
+            child: None,
+            minor: LATEST_MINOR,
+            daemon_nix_version: String::new(),
+            trusted: None,
+            stats: Stats::default(),
+            activities: HashMap::new(),
+            parents: HashMap::new(),
+            ids: HashMap::new(),
+            builds: BuildCounts::default(),
+        }
+    }
+
+    #[test]
+    fn quiet_worker_relay_preserves_approved_raw_stderr_and_activity_lifecycle() {
+        let session = crate::session::Session::new();
+        let _entered = session.enter();
+        log::set_verbosity(0);
+        log::set_format("internal-json").unwrap();
+        let shown = Captured::default();
+        session.log.write_to(Box::new(shown.clone()));
+        let mut reply = Vec::new();
+        write_u64(&mut reply, STDERR_NEXT).unwrap();
+        write_str(&mut reply, b"approved daemon text\n").unwrap();
+        write_u64(&mut reply, STDERR_START_ACTIVITY).unwrap();
+        for n in [42, 7, log::ACT_FILE_TRANSFER] {
+            write_u64(&mut reply, n).unwrap();
+        }
+        write_str(&mut reply, b"download").unwrap();
+        write_u64(&mut reply, 0).unwrap();
+        write_u64(&mut reply, 0).unwrap();
+        write_u64(&mut reply, STDERR_RESULT).unwrap();
+        for n in [42, RES_BUILD_LOG_LINE, 1, 1] {
+            write_u64(&mut reply, n).unwrap();
+        }
+        write_str(&mut reply, b"builder line").unwrap();
+        write_u64(&mut reply, STDERR_STOP_ACTIVITY).unwrap();
+        write_u64(&mut reply, 42).unwrap();
+        write_u64(&mut reply, STDERR_LAST).unwrap();
+        let mut client = connection(reply, Captured::default());
+        let mut lines = Vec::new();
+        client
+            .process_stderr(&mut |event| {
+                if let Event::Log(line) = event {
+                    if line.drv_path.is_empty() {
+                        log::relay(&String::from_utf8_lossy(&line.line));
+                    }
+                    lines.push(line.line);
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            lines,
+            [b"approved daemon text".to_vec(), b"builder line".to_vec()]
+        );
+        assert!(client.ids.is_empty());
+        let bytes = shown.0.lock().unwrap();
+        let records: Vec<Value> = str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line.strip_prefix("@nix ").unwrap()).unwrap())
+            .collect();
+        assert_eq!(records[0]["msg"], "approved daemon text");
+        assert_eq!(records[0]["level"], 0);
+        let start = records.iter().find(|v| v["action"] == "start").unwrap();
+        assert_eq!(start["level"], 7);
+        assert!(records.iter().any(|v| v["action"] == "result" && v["id"] == start["id"]));
+        assert!(records.iter().any(|v| v["action"] == "stop" && v["id"] == start["id"]));
+    }
 
     #[test]
     fn transport_from_url() {
