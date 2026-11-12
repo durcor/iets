@@ -572,6 +572,169 @@ fn activity_records() {
     }
 }
 
+/// NH appends internal-json and --verbose, then pipes to `nom --json`.
+/// Nix's build is not a --json build: its activities and builder logs are
+/// stderr records, and its own exit status decides whether NH failed.
+#[test]
+fn nh_nom_arguments_preserve_native_builds_and_json_logs() {
+    let s = store!();
+    let f = Farm::new(&s);
+    for (index, (flag, before, fails)) in [
+        ("--verbose", false, false),
+        ("-v", false, false),
+        ("--verbose", true, false),
+        ("-v", true, false),
+        ("--verbose", false, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = format!("nh-nom-{index}");
+        let name = format!("classic-nh-nom-{index}-@NONCE@");
+        let finish = if fails {
+            "exit 7"
+        } else {
+            "echo native-nom > $out"
+        };
+        s.write(
+            &format!("{dir}/flake.nix"),
+            &format!(
+                r#"{{
+  outputs = {{ self }}: {{
+    packages."@SYSTEM@".default = derivation {{
+      name = "{name}";
+      system = "@SYSTEM@";
+      builder = "@SHELL@";
+      args = [ "-c" "echo nom-builder-stdout; echo nom-builder-stderr >&2; {finish}" ];
+    }};
+  }};
+}}"#
+            ),
+        );
+        s.write(
+            &format!("{dir}/flake.lock"),
+            r#"{"nodes":{"root":{}},"root":"root","version":7}"#,
+        );
+        let mut cmd = f.ours("nix");
+        cmd.env("IETS_NIX_FALLBACK", "never");
+        if before {
+            cmd.arg(flag);
+        }
+        cmd.arg("build")
+            .arg(format!("path:{}#default", s.dir().join(&dir).display()))
+            .args([
+                "--no-link",
+                "--print-out-paths",
+                "--option",
+                "builders",
+                "",
+                "--max-jobs",
+                "1",
+                "--cores",
+                "1",
+                "--log-format",
+                "internal-json",
+            ]);
+        if !before {
+            cmd.arg(flag);
+        }
+        let o = cmd.output().unwrap();
+        let err = stderr(&o);
+        assert_eq!(
+            o.status.code(),
+            Some(i32::from(fails)),
+            "{flag} before={before}: {err}"
+        );
+        assert!(!err.contains("falling back"), "{err}");
+        if fails {
+            assert!(o.stdout.is_empty(), "{}", stdout(&o));
+        } else {
+            assert_eq!(fs::read_to_string(stdout(&o)).unwrap(), "native-nom\n");
+        }
+
+        // Do not silently skip plain text or malformed records. These are
+        // the consumer's required fields, including its four build fields,
+        // one string per build-log result and four integers per progress.
+        let recs: Vec<Value> = err
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line.strip_prefix("@nix ").expect("JSON log line")).unwrap()
+            })
+            .collect();
+        let mut active = BTreeMap::new();
+        let mut build_ids = Vec::new();
+        let mut lines = Vec::new();
+        for r in &recs {
+            match r["action"].as_str().unwrap() {
+                "msg" => {
+                    assert!(r["level"].as_u64().is_some_and(|n| n <= 7), "{r}");
+                    assert!(r["msg"].is_string(), "{r}");
+                }
+                "start" => {
+                    let id = r["id"].as_u64().unwrap();
+                    let ty = r["type"].as_u64().unwrap();
+                    assert!(active.insert(id, ty).is_none(), "{r}");
+                    assert!(r["text"].is_string(), "{r}");
+                    assert!(r["parent"].is_u64(), "{r}");
+                    assert!(r["level"].as_u64().is_some_and(|n| n <= 7), "{r}");
+                    if ty == 105 {
+                        let fields = r["fields"].as_array().unwrap();
+                        assert_eq!(fields.len(), 4, "{r}");
+                        let drv = fields[0].as_str().unwrap();
+                        assert!(drv.starts_with(s.store_dir().to_str().unwrap()), "{r}");
+                        assert!(
+                            drv.ends_with(".drv")
+                                && drv.contains(&format!("classic-nh-nom-{index}-")),
+                            "{r}"
+                        );
+                        assert!(
+                            fields[1].is_string() && fields[2].is_u64() && fields[3].is_u64(),
+                            "{r}"
+                        );
+                        build_ids.push(id);
+                    }
+                }
+                "result" => {
+                    let id = r["id"].as_u64().unwrap();
+                    let ty = r["type"].as_u64().unwrap();
+                    assert!(active.contains_key(&id), "{r}");
+                    if matches!(ty, 101 | 104 | 107) {
+                        let fields = r["fields"].as_array().unwrap();
+                        assert_eq!(fields.len(), 1, "{r}");
+                        let text = fields[0].as_str().unwrap();
+                        if ty == 101 {
+                            assert_eq!(active[&id], 105, "{r}");
+                            lines.push(text);
+                        }
+                    } else if ty == 105 {
+                        let fields = r["fields"].as_array().unwrap();
+                        assert_eq!(fields.len(), 4, "{r}");
+                        assert!(fields.iter().all(Value::is_u64), "{r}");
+                    }
+                }
+                "stop" => {
+                    assert!(active.remove(&r["id"].as_u64().unwrap()).is_some(), "{r}");
+                }
+                _ => panic!("unexpected log record: {r}"),
+            }
+        }
+        assert!(active.is_empty(), "unclosed activities: {active:?}\n{err}");
+        assert_eq!(build_ids.len(), 1, "{err}");
+        assert_eq!(lines, ["nom-builder-stdout", "nom-builder-stderr"], "{err}");
+        assert_eq!(
+            recs.iter().filter(|r| r["code"] == "ignored-flag").count(),
+            1,
+            "{err}"
+        );
+        assert_eq!(
+            recs.iter()
+                .any(|r| r["code"] == "build-failed" && r["level"] == 0),
+            fails,
+            "{err}"
+        );
+    }
+}
+
 /// `--no-out-link` and `--no-link` ask for no symlink. Nix then lets the
 /// output go, and iets keeps a root in its roots store instead.
 #[test]

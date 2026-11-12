@@ -41,6 +41,8 @@ const GLOBALS: &[(&str, usize)] = &[
     ("--no-pure-eval", 0),
     ("--accept-flake-config", 0),
     ("--show-trace", 0),
+    ("-v", 0),
+    ("--verbose", 0),
     ("--log-format", 1),
     ("--experimental-features", 1),
     ("--extra-experimental-features", 1),

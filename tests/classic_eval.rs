@@ -1148,6 +1148,40 @@ fn internal_json_errors() {
     );
 }
 
+#[test]
+fn nix_verbosity_spelling_as_an_operand_stays_data() {
+    let s = store!();
+    let f = Farm::new(&s);
+    for value in ["-v", "--verbose"] {
+        for before in [false, true] {
+            let mut cmd = f.ours("nix");
+            cmd.env("IETS_NIX_FALLBACK", "never");
+            if before {
+                cmd.args(["--argstr", "value", value]);
+            }
+            cmd.arg("eval");
+            if !before {
+                cmd.args(["--argstr", "value", value]);
+            }
+            let o = cmd
+                .args([
+                    "--raw",
+                    "--log-format",
+                    "internal-json",
+                    "--expr",
+                    "{ value }: value",
+                ])
+                .output()
+                .unwrap();
+            let err = stderr(&o);
+            assert!(o.status.success(), "{value} before={before}: {err}");
+            assert_eq!(stdout(&o), value, "{err}");
+            assert!(!err.contains("falling back"), "{err}");
+            assert!(records(&err).iter().all(|r| r["code"] != "ignored-flag"), "{err}");
+        }
+    }
+}
+
 /// A flag or a setting with no effect: one warning that gives the reason,
 /// where Nix prints nothing. stdout and the exit code stay Nix's.
 #[test]
