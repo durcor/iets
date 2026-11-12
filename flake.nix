@@ -55,6 +55,7 @@
       devShells = forAll (scope: { default = scope.devShell; });
       nixosModules.default = import ./nix/module.nix self;
       lib.mkClassic = pkgs: iets: nix: pkgs.callPackage ./nix/classic.nix { inherit iets nix; };
+      lib.mkNh = pkgs: iets: nix: nh: pkgs.callPackage ./nix/nh.nix { inherit iets nix nh; };
       packages = lib.recursiveUpdate
         (forAll (scope: onLinux scope
           (scope.callPackages ./nix/packages.nix { })
