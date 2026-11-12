@@ -12,7 +12,7 @@ pub mod shell;
 
 use crate::session::exit;
 use crate::sys::process;
-use std::io::{self, IsTerminal};
+use std::env;
 use std::process::Command;
 
 use crate::cli::{EvalArgs, EvalFlags, abs_path, eval_flag, full_includes, jobs};
@@ -22,7 +22,7 @@ use crate::remote::worker::{Options, Transport, default_socket};
 use crate::runtime::Word;
 use crate::session::Session;
 use crate::settings::{NixFallback, builders};
-use crate::{api, argv, ignored, lint, log, nixbin};
+use crate::{api, argv, lint, log, nixbin};
 
 /// The command names iets answers to when it is installed as classic Nix.
 pub const NAMES: &[&str] = &[
@@ -36,11 +36,17 @@ pub const NAMES: &[&str] = &[
 /// Runs the classic command `name`. `argv` is everything after `argv[0]`.
 pub fn dispatch(name: &str, argv: &[String]) -> i32 {
     log::set_classic();
-    log::set_verbosity(if name == "nix" && io::stderr().is_terminal() {
-        log::LVL_NOTICE
-    } else {
-        log::LVL_INFO
-    });
+    log::set_verbosity(
+        if name == "nix"
+            && log::interactive()
+            && env::var_os("NO_COLOR").is_none()
+            && env::var_os("NOCOLOR").is_none()
+        {
+            log::LVL_NOTICE
+        } else {
+            log::LVL_INFO
+        },
+    );
     if Session::current().settings().nix_fallback == NixFallback::Always {
         fallback(name, argv, "nix-fallback is always");
     }
@@ -58,7 +64,11 @@ pub fn dispatch(name: &str, argv: &[String]) -> i32 {
 pub fn fallback(name: &str, argv: &[String], reason: &str) -> ! {
     let strict = Session::current().settings().nix_fallback == NixFallback::Never;
     log::msg(
-        if strict { log::LVL_ERROR } else { log::LVL_NOTICE } as u8,
+        if strict {
+            log::LVL_ERROR
+        } else {
+            log::LVL_NOTICE
+        } as u8,
         &format!("iets: falling back to {name}: {reason}"),
     );
     if strict {
@@ -296,6 +306,7 @@ pub fn eval_input(ev: &mut Evaluator, c: &Common, file: &str, cwd: &[u8]) -> Eva
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ignored;
 
     fn flag(line: &[&str]) -> Result<bool, String> {
         let all: Vec<String> = line.iter().map(|s| s.to_string()).collect();
@@ -367,8 +378,11 @@ mod tests {
             let (c, text) = messages(&flags);
             assert!(!c.quiet, "verbosity must not disable builder output");
             for level in 0..=7 {
-                assert_eq!(text.contains(&format!("probe{level}")), level <= threshold,
-                    "{flags:?} at {level}: {text}");
+                assert_eq!(
+                    text.contains(&format!("probe{level}")),
+                    level <= threshold,
+                    "{flags:?} at {level}: {text}"
+                );
             }
         }
     }
@@ -381,11 +395,16 @@ mod tests {
         let _entered = session.enter();
         let all = Vec::new();
         let mut a = Argv { all: &all, i: 0 };
-        assert_eq!(common_flag(&mut Common::default(), &mut a, "--quiet"), Ok(true));
+        assert_eq!(
+            common_flag(&mut Common::default(), &mut a, "--quiet"),
+            Ok(true)
+        );
         std::thread::spawn(crate::session::bind(|| {
             log::msg(2, "worker-notice");
             log::msg(3, "worker-info");
-        })).join().unwrap();
+        }))
+        .join()
+        .unwrap();
         let other = Session::new();
         other.log.write_to(Box::new(sink.clone()));
         {
@@ -402,21 +421,26 @@ mod tests {
             nix_fallback: NixFallback::Never,
             ..crate::settings::Settings::default()
         });
-        session.catch_exit.store(true, std::sync::atomic::Ordering::Relaxed);
+        session
+            .catch_exit
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let sink = crate::sink::Sink::default();
         session.log.write_to(Box::new(sink.clone()));
         let _entered = session.enter();
         log::set_verbosity(0);
         log::set_format("internal-json").unwrap();
-        let e = std::panic::catch_unwind(|| fallback("nix", &[], "unsupported-token"))
-            .unwrap_err();
+        let e = std::panic::catch_unwind(|| fallback("nix", &[], "unsupported-token")).unwrap_err();
         assert_eq!(e.downcast_ref::<crate::session::Exit>().unwrap().0, 1);
         let text = sink.text();
-        let records: Vec<serde_json::Value> = text.lines().map(|line| {
-            serde_json::from_str(line.strip_prefix("@nix ").unwrap()).unwrap()
-        }).collect();
+        let records: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line.strip_prefix("@nix ").unwrap()).unwrap())
+            .collect();
         assert!(!records.is_empty(), "{text}");
         assert!(records.iter().all(|r| r["level"] == 0), "{text}");
-        assert!(text.contains("unsupported-token") && text.contains("nix-fallback is never"), "{text}");
+        assert!(
+            text.contains("unsupported-token") && text.contains("nix-fallback is never"),
+            "{text}"
+        );
     }
 }

@@ -109,7 +109,10 @@ fn selected_session_verbosity_controls_real_daemon_messages() {
     for from_config in [false, true] {
         let quiet = query(0, from_config);
         let debug = query(6, from_config);
-        assert!(quiet.is_empty(), "unexpected quiet daemon messages: {quiet:?}");
+        assert!(
+            quiet.is_empty(),
+            "unexpected quiet daemon messages: {quiet:?}"
+        );
         assert!(
             !debug.is_empty(),
             "the daemon must emit debug diagnostics for the cache query"

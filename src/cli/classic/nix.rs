@@ -831,15 +831,20 @@ mod tests {
             let k = find_sub(&argv).unwrap();
             assert_eq!(argv.remove(k), "eval");
             let n = parse_eval(&argv).unwrap();
-            assert!(matches!(&n.c.flags.args[0], (name, crate::api::ArgKind::Str(value))
-                if name == "value" && value == "--debug"));
+            assert!(
+                matches!(&n.c.flags.args[0], (name, crate::api::ArgKind::Str(value))
+                if name == "value" && value == "--debug")
+            );
             for level in 0..=7 {
                 crate::log::msg(level, &format!("message{level}"));
             }
             let text = sink.text();
             for level in 0..=7 {
-                assert_eq!(text.contains(&format!("message{level}")), level <= expected,
-                    "{before:?} eval {after:?}: {text}");
+                assert_eq!(
+                    text.contains(&format!("message{level}")),
+                    level <= expected,
+                    "{before:?} eval {after:?}: {text}"
+                );
             }
         }
     }

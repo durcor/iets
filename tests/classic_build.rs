@@ -586,8 +586,16 @@ fn nh_nom_arguments_preserve_native_builds_and_json_logs() {
         (&["-v"][..], true, false),
         (&["--verbose"][..], false, true),
         (&["-vvvvvvvv"][..], true, false),
-        (&["--quiet", "--quiet", "--quiet", "--quiet"][..], false, false),
-        (&["--quiet", "--quiet", "--quiet", "--quiet"][..], true, true),
+        (
+            &["--quiet", "--quiet", "--quiet", "--quiet"][..],
+            false,
+            false,
+        ),
+        (
+            &["--quiet", "--quiet", "--quiet", "--quiet"][..],
+            true,
+            true,
+        ),
     ]
     .into_iter()
     .enumerate()

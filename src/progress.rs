@@ -425,7 +425,11 @@ mod tests {
             b.start(1, log::LVL_TALKATIVE, ACT_FILE_TRANSFER, "download", 0)
                 .is_none()
         );
-        b.result(1, log::RES_PROGRESS, &[10.into(), 20.into(), 1.into(), 0.into()]);
+        b.result(
+            1,
+            log::RES_PROGRESS,
+            &[10.into(), 20.into(), 1.into(), 0.into()],
+        );
         {
             let t = b.lock();
             assert_eq!(t.all[&1].done, 10);

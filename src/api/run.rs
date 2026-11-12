@@ -282,4 +282,87 @@ mod tests {
         assert_eq!(one, n as u64, "one derivation per list element");
         assert_eq!(four, one, "the helper fibers' derivations are counted too");
     }
+
+    #[test]
+    fn quiet_cache_fill_keeps_warnings_for_current_level_replay_under_the_same_key() {
+        use crate::lint::{Config, Level};
+        use crate::log;
+        use crate::session::Session;
+        use crate::trace::store::Part;
+
+        let d = tempdir().unwrap();
+        let source = d.path().join("warning.nix");
+        fs::write(&source, "http://example.invalid\n").unwrap();
+        fs::File::open(&source)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000))
+            .unwrap();
+        let cache_dir = d.path().join("cache");
+        let mut entry = None;
+        let mut kept = None;
+        for (index, level) in [0, 1, 0].into_iter().enumerate() {
+            let session = Session::new();
+            let _entered = session.enter();
+            let sink = crate::sink::Sink::default();
+            session.log.write_to(Box::new(sink.clone()));
+            log::set_verbosity(level);
+            let a = EvalArgs {
+                input: Some(Input::File(source.to_str().unwrap().into())),
+                cache_dir: Some(cache_dir.to_str().unwrap().into()),
+                no_tracing_cache: false,
+                no_ir_cache: true,
+                workers: 1,
+                ..EvalArgs::new()
+            };
+            let mut lints = Config::off();
+            lints.set("url-literal", Level::Warn).unwrap();
+            let cfg = EvalConfig::new()
+                .session(session.clone())
+                .lints(lints)
+                .lint_root(d.path().to_str().unwrap().as_bytes());
+            let run = Run::on(cfg).workers(1).cached(&a, "eval");
+            let cache = run.cache.as_ref().unwrap();
+            let path = cache.entry_path();
+            if let Some(expected) = &entry {
+                assert_eq!(&path, expected);
+            }
+            entry = Some(path);
+            let hit = run.hit(|cache| {
+                cache.replay_warnings();
+                cache.part(Part::Result)
+            });
+            let result = if index == 0 {
+                assert!(hit.is_none());
+                run.go(move |ev, cache| {
+                    let value = api::evaluate(ev, a).unwrap();
+                    let mut out = Vec::new();
+                    crate::print::print_json(
+                        ev,
+                        value,
+                        &mut out,
+                        &mut Vec::new(),
+                        true,
+                        crate::eval::Pos::NONE,
+                    )
+                    .unwrap();
+                    ev.lints.flush();
+                    cache.unwrap().write(ev, &out, false);
+                    out
+                })
+                .unwrap()
+            } else {
+                let warnings = cache
+                    .part(Part::Warnings)
+                    .expect("quiet cache fill kept its warning");
+                assert!(String::from_utf8_lossy(&warnings).contains("url-literal"));
+                if let Some(expected) = &kept {
+                    assert_eq!(&warnings, expected);
+                }
+                kept = Some(warnings);
+                hit.expect("verbosity must not create a cache miss")
+            };
+            assert_eq!(result, b"\"http://example.invalid\"");
+            assert_eq!(sink.text().contains("warning: [url-literal]"), level >= 1);
+        }
+    }
 }

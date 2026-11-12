@@ -782,7 +782,10 @@ pub fn replay_lints(bytes: &[u8]) -> Vec<u8> {
                 out.push_str("@nix ");
                 out.push_str(&s.log.wire(&v));
             } else {
-                out.push_str(&filter_ansi(v["msg"].as_str().unwrap_or_default(), !stderr_is_tty()));
+                out.push_str(&filter_ansi(
+                    v["msg"].as_str().unwrap_or_default(),
+                    !stderr_is_tty(),
+                ));
             }
             out.push('\n');
         }
@@ -1323,9 +1326,17 @@ mod tests {
                 args(r#"builtins.trace "trace-visible" (builtins.warn "warning-threshold" 42)"#),
             )
             .unwrap();
-            let mut output = s.out.writer();
-            crate::print::print_json(&mut ev, value, &mut output, &mut Vec::new(), true, Pos::NONE)
-                .unwrap();
+            let mut output = Vec::new();
+            crate::print::print_json(
+                &mut ev,
+                value,
+                &mut output,
+                &mut Vec::new(),
+                true,
+                Pos::NONE,
+            )
+            .unwrap();
+            s.out.write_all(&output).unwrap();
             assert_eq!(stdout.take(), "42");
             let text = stderr.take();
             assert!(text.contains("trace: trace-visible"), "{text}");
@@ -1413,7 +1424,10 @@ mod tests {
             msg(7, "hidden vomit");
         }
         msg(2, "still hidden notice");
-        assert_eq!(out_a.take(), "default info\nsaturated high\nthread warning\n");
+        assert_eq!(
+            out_a.take(),
+            "default info\nsaturated high\nthread warning\n"
+        );
         assert_eq!(out_b.take(), "independent info\nordered debug\n");
     }
 
@@ -1473,7 +1487,10 @@ mod tests {
         assert_eq!(format("warning: collected"), "warning: collected");
         assert!(replay_lints(record.as_bytes()).is_empty());
         set_verbosity(1);
-        assert_eq!(replay_lints(record.as_bytes()), format!("{text}\n").as_bytes());
+        assert_eq!(
+            replay_lints(record.as_bytes()),
+            format!("{text}\n").as_bytes()
+        );
         set_verbosity(0);
         assert!(replay_lints(record.as_bytes()).is_empty());
         line("warning: hidden");

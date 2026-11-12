@@ -1207,15 +1207,25 @@ fn classic_quiet_preserves_stdout_and_errors_across_sessions() {
             }
             args.extend(["--expr", "6 * 7"]);
             let value = run(&args, &host);
-            assert_eq!((value.rc, value.stdout.trim()), (0, "42"), "{}", value.stderr);
+            assert_eq!(
+                (value.rc, value.stdout.trim()),
+                (0, "42"),
+                "{}",
+                value.stderr
+            );
             *args.last_mut().unwrap() = "throw \"verbosity-error-marker\"";
             let failure = run(&args, &host);
             assert_eq!(failure.rc, 1, "{}", failure.stderr);
             assert!(failure.stdout.is_empty());
             let errors = records(&failure.stderr);
-            assert!(errors.iter().any(|r| r["level"] == 0
-                && r["msg"].as_str().is_some_and(|s| s.contains("verbosity-error-marker"))),
-                "{}", failure.stderr);
+            assert!(
+                errors.iter().any(|r| r["level"] == 0
+                    && r["msg"]
+                        .as_str()
+                        .is_some_and(|s| s.contains("verbosity-error-marker"))),
+                "{}",
+                failure.stderr
+            );
         }
     }
 }
@@ -1581,6 +1591,72 @@ in {
             &format!("derivation show {a:?} falls back"),
             why.contains("iets: falling back to nix:"),
             &why,
+        );
+    }
+}
+
+#[test]
+fn nix_terminal_defaults_follow_nix_tty_and_color_semantics() {
+    let Some(script) = e2e::which("script") else {
+        return;
+    };
+    let bin = hermetic::bin();
+    let expr = r#"builtins.warn "terminal-warning-marker" 43"#;
+    let args = [
+        "nix",
+        "eval",
+        "--json",
+        "--expr",
+        expr,
+        "--quiet",
+        "--quiet",
+        "--log-format",
+        "internal-json",
+        "--iets-option",
+        "nix-fallback",
+        "never",
+    ];
+    let quoted = std::iter::once(env!("CARGO_BIN_EXE_iets"))
+        .chain(args)
+        .map(|s| format!("'{}'", s.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for (term, color, tty, shown) in [
+        (Some("xterm"), None, true, false),
+        (Some("dumb"), None, true, true),
+        (None, None, true, true),
+        (Some("xterm"), Some("NO_COLOR"), true, true),
+        (Some("xterm"), Some("NOCOLOR"), true, true),
+        (Some("xterm"), None, false, true),
+    ] {
+        let mut cmd = if tty {
+            let mut c = bin.cmd_as(&script);
+            c.args(["-q", "-e", "-c", &quoted, "/dev/null"]);
+            c
+        } else {
+            let mut c = bin.cmd();
+            c.args(args);
+            c
+        };
+        cmd.env("IETS_CACHE", "0").env_remove("TERM");
+        if let Some(term) = term {
+            cmd.env("TERM", term);
+        }
+        if let Some(color) = color {
+            cmd.env(color, "");
+        }
+        let output = cmd.output().unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            stderr(&output)
+        );
+        assert!(output.status.success(), "{term:?}/{color:?}/{tty}: {text}");
+        assert!(text.contains("43"), "{text}");
+        assert_eq!(
+            text.contains("terminal-warning-marker"),
+            shown,
+            "{term:?}/{color:?}/{tty}: {text}"
         );
     }
 }

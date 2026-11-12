@@ -506,21 +506,53 @@ fn verbosity_keeps_jobs_diagnostics_and_quiet_summary_distinct(bin: Iets) {
       bad = throw "jobs-error-marker";
     }"#;
     for memory in ["0", "4096"] {
-        for flags in [vec![], vec!["--verbose"], vec!["--debug", "--verbose"], vec!["--verbose", "--debug", "--quiet"]] {
-            let o = bin.cmd().args([
-                "eval-jobs", "--no-instantiate", "--workers", "1",
-                "--max-memory-size", memory, "--expr", expr,
-            ]).args(&flags).output().unwrap();
+        for flags in [
+            vec![],
+            vec!["--verbose"],
+            vec!["--debug", "--verbose"],
+            vec!["--verbose", "--debug", "--quiet"],
+        ] {
+            let o = bin
+                .cmd()
+                .args([
+                    "eval-jobs",
+                    "--no-instantiate",
+                    "--workers",
+                    "1",
+                    "--max-memory-size",
+                    memory,
+                    "--expr",
+                    expr,
+                ])
+                .args(&flags)
+                .output()
+                .unwrap();
             let err = stderr(&o);
             assert!(o.status.success(), "{memory} {flags:?}: {err}");
-            let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout).lines()
-                .map(|line| serde_json::from_str(line).unwrap()).collect();
+            let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
             assert_eq!(lines.len(), 2, "{lines:?}\n{err}");
-            assert!(lines.iter().any(|line| line["name"] == "jobs-verbosity"), "{lines:?}");
-            assert!(lines.iter().any(|line| line["error"].as_str()
-                .is_some_and(|e| e.contains("jobs-error-marker"))), "{lines:?}");
-            assert!(err.contains("jobs-diagnostic-marker"), "{memory} {flags:?}: {err}");
-            assert_eq!(err.contains("eval-jobs:"), !flags.contains(&"--quiet"), "{err}");
+            assert!(
+                lines.iter().any(|line| line["name"] == "jobs-verbosity"),
+                "{lines:?}"
+            );
+            assert!(
+                lines.iter().any(|line| line["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("jobs-error-marker"))),
+                "{lines:?}"
+            );
+            assert!(
+                err.contains("jobs-diagnostic-marker"),
+                "{memory} {flags:?}: {err}"
+            );
+            assert_eq!(
+                err.contains("eval-jobs:"),
+                !flags.contains(&"--quiet"),
+                "{err}"
+            );
         }
     }
 }
@@ -536,11 +568,18 @@ fn verbosity_looking_jobs_operands_remain_data_in_workers(bin: Iets) {
             ]).output().unwrap();
             let err = stderr(&o);
             assert!(o.status.success(), "{memory} {value}: {err}");
-            let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout).lines()
-                .map(|line| serde_json::from_str(line).unwrap()).collect();
+            let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
             assert_eq!(lines.len(), 1, "{err}");
             assert_eq!(lines[0]["name"], "jobs-operand", "{err}");
-            assert!(lines[0]["drvPath"].as_str().is_some_and(|p| p.ends_with(".drv")), "{lines:?}");
+            assert!(
+                lines[0]["drvPath"]
+                    .as_str()
+                    .is_some_and(|p| p.ends_with(".drv")),
+                "{lines:?}"
+            );
         }
     }
 }
@@ -553,9 +592,23 @@ fn stdin_substitution_rewrites_only_parsed_flags_in_worker_argv(bin: Iets) {
     for memory in ["0", "4096"] {
         let mut baseline = bin.cmd();
         baseline.args([
-            "eval-jobs", "--no-instantiate", "--workers", "1", "--quiet",
-            "--max-memory-size", memory, "--argstr", "value", "--arg-from-stdin",
-            "--argstr", "extra", "--debug", "--expr", expr, "--verbose", "--debug",
+            "eval-jobs",
+            "--no-instantiate",
+            "--workers",
+            "1",
+            "--quiet",
+            "--max-memory-size",
+            memory,
+            "--argstr",
+            "value",
+            "--arg-from-stdin",
+            "--argstr",
+            "extra",
+            "--debug",
+            "--expr",
+            expr,
+            "--verbose",
+            "--debug",
         ]);
         let expected = baseline.output().unwrap();
         assert!(expected.status.success(), "{}", stderr(&expected));
@@ -563,12 +616,31 @@ fn stdin_substitution_rewrites_only_parsed_flags_in_worker_argv(bin: Iets) {
         assert_eq!(expected_lines.len(), 1);
         assert!(expected_lines[0].contains("jobs-stdin-operand"));
 
-        let mut child = bin.cmd().args([
-            "eval-jobs", "--no-instantiate", "--workers", "1", "--quiet",
-            "--max-memory-size", memory, "--argstr", "value", "--arg-from-stdin",
-            "--arg-from-stdin", "extra", "--expr", expr, "--verbose", "--debug",
-        ]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .spawn().unwrap();
+        let mut child = bin
+            .cmd()
+            .args([
+                "eval-jobs",
+                "--no-instantiate",
+                "--workers",
+                "1",
+                "--quiet",
+                "--max-memory-size",
+                memory,
+                "--argstr",
+                "value",
+                "--arg-from-stdin",
+                "--arg-from-stdin",
+                "extra",
+                "--expr",
+                expr,
+                "--verbose",
+                "--debug",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
         child.stdin.take().unwrap().write_all(b"--debug").unwrap();
         let actual = child.wait_with_output().unwrap();
         assert!(actual.status.success(), "{}", stderr(&actual));

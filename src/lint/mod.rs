@@ -1129,7 +1129,10 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert!(log::replay_lints(records[0].as_bytes()).is_empty());
         log::set_verbosity(1);
-        assert_eq!(log::replay_lints(records[0].as_bytes()), format!("{line}\n").as_bytes());
+        assert_eq!(
+            log::replay_lints(records[0].as_bytes()),
+            format!("{line}\n").as_bytes()
+        );
     }
 
     /// A `/tmp/iets.toml` must not set a lint level for a project below it:

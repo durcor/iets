@@ -1179,8 +1179,16 @@ mod tests {
         assert_eq!(failure["level"], 0);
         let start = records.iter().find(|v| v["text"] == "download").unwrap();
         assert_eq!(start["parent"], act.0);
-        assert!(records.iter().any(|v| v["action"] == "result" && v["id"] == start["id"]));
-        assert!(records.iter().any(|v| v["action"] == "stop" && v["id"] == start["id"]));
+        assert!(
+            records
+                .iter()
+                .any(|v| v["action"] == "result" && v["id"] == start["id"])
+        );
+        assert!(
+            records
+                .iter()
+                .any(|v| v["action"] == "stop" && v["id"] == start["id"])
+        );
     }
 
     #[test]

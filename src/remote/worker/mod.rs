@@ -753,7 +753,7 @@ impl Connection {
             o.keep_failed.into(),       // keep-failed
             o.keep_going.into(),        // keep-going
             o.try_fallback.into(),      // try-fallback
-            o.verbosity.min(LVL_VOMIT),  // verbosity
+            o.verbosity.min(LVL_VOMIT), // verbosity
             o.max_jobs,                 // max-jobs
             o.max_silent_time,          // max-silent-time
             1,                          // obsolete use-build-hook
@@ -1364,8 +1364,16 @@ mod tests {
         assert_eq!(records[0]["level"], 0);
         let start = records.iter().find(|v| v["action"] == "start").unwrap();
         assert_eq!(start["level"], 7);
-        assert!(records.iter().any(|v| v["action"] == "result" && v["id"] == start["id"]));
-        assert!(records.iter().any(|v| v["action"] == "stop" && v["id"] == start["id"]));
+        assert!(
+            records
+                .iter()
+                .any(|v| v["action"] == "result" && v["id"] == start["id"])
+        );
+        assert!(
+            records
+                .iter()
+                .any(|v| v["action"] == "stop" && v["id"] == start["id"])
+        );
     }
 
     #[test]

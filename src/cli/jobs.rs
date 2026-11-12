@@ -576,8 +576,11 @@ mod tests {
             }
             let text = sink.text();
             for level in 0..=7 {
-                assert_eq!(text.contains(&format!("jobs-message{level}")), level <= threshold,
-                    "{flags:?}: {text}");
+                assert_eq!(
+                    text.contains(&format!("jobs-message{level}")),
+                    level <= threshold,
+                    "{flags:?}: {text}"
+                );
             }
         }
     }
