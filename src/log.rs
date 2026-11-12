@@ -303,21 +303,37 @@ pub fn set_verbosity(level: u64) {
 }
 
 pub fn increase_verbosity() {
-    let _ = cur()
-        .log
-        .verbosity
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |level| {
-            (level < LVL_VOMIT).then_some(level + 1)
-        });
+    let s = cur();
+    let level = &s.log.verbosity;
+    let mut current = level.load(Ordering::Relaxed);
+    while current < LVL_VOMIT {
+        match level.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actual) => current = actual,
+        }
+    }
 }
 
 pub fn decrease_verbosity() {
-    let _ = cur()
-        .log
-        .verbosity
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |level| {
-            level.checked_sub(1)
-        });
+    let s = cur();
+    let level = &s.log.verbosity;
+    let mut current = level.load(Ordering::Relaxed);
+    while current > LVL_ERROR {
+        match level.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actual) => current = actual,
+        }
+    }
 }
 
 /// Whether a leveled message is visible; raw relays and activity records are
@@ -1429,6 +1445,35 @@ mod tests {
             "default info\nsaturated high\nthread warning\n"
         );
         assert_eq!(out_b.take(), "independent info\nordered debug\n");
+    }
+
+    #[test]
+    fn concurrent_bound_selectors_do_not_lose_updates_or_wrap_at_the_bounds() {
+        let (session, shown) = captured();
+        let _entered = session.enter();
+        let adjust = |threads, change: fn()| {
+            let ready = Arc::new(std::sync::Barrier::new(threads + 1));
+            std::thread::scope(|scope| {
+                for _ in 0..threads {
+                    let ready = ready.clone();
+                    scope.spawn(crate::session::bind(move || {
+                        ready.wait();
+                        change();
+                    }));
+                }
+                ready.wait();
+            });
+        };
+        set_verbosity(0);
+        adjust(7, increase_verbosity);
+        msg(7, "all increments reached the shared session");
+        adjust(8, decrease_verbosity);
+        msg(1, "must be hidden after saturating at zero");
+        msg(0, "errors remain visible");
+        assert_eq!(
+            shown.take(),
+            "all increments reached the shared session\nerrors remain visible\n"
+        );
     }
 
     #[test]
