@@ -1451,7 +1451,7 @@ mod tests {
     fn concurrent_bound_selectors_do_not_lose_updates_or_wrap_at_the_bounds() {
         let (session, shown) = captured();
         let _entered = session.enter();
-        let adjust = |threads, change: fn()| {
+        let adjust = |threads: usize, change: fn()| {
             let ready = Arc::new(std::sync::Barrier::new(threads + 1));
             std::thread::scope(|scope| {
                 for _ in 0..threads {
