@@ -1153,7 +1153,7 @@ fn nix_verbosity_spelling_as_an_operand_stays_data() {
     let s = store!();
     let f = Farm::new(&s);
     let file = s.write("verbosity-operand.nix", "{ value }: { result = value; }");
-    for value in ["-v", "--verbose"] {
+    for value in ["-v", "--verbose", "-vv", "--quiet", "--debug"] {
         for before in [false, true] {
             let mut cmd = f.ours("nix");
             cmd.env("IETS_NIX_FALLBACK", "never");
@@ -1179,10 +1179,43 @@ fn nix_verbosity_spelling_as_an_operand_stays_data() {
             assert!(o.status.success(), "{value} before={before}: {err}");
             assert_eq!(stdout(&o), value, "{err}");
             assert!(!err.contains("falling back"), "{err}");
-            assert!(
-                records(&err).iter().all(|r| r["code"] != "ignored-flag"),
-                "{err}"
-            );
+        }
+    }
+}
+
+#[test]
+fn classic_quiet_preserves_stdout_and_errors_across_sessions() {
+    use iets::cli::run::{Host, run};
+
+    let home = tempfile::tempdir().unwrap();
+    let host = Host::default().env([
+        ("HOME", home.path().to_str().unwrap()),
+        ("XDG_CONFIG_HOME", home.path().to_str().unwrap()),
+        ("XDG_CONFIG_DIRS", "/nonexistent"),
+        ("NIX_CONF_DIR", "/nonexistent"),
+        ("NIX_USER_CONF_FILES", "/nonexistent"),
+        ("IETS_NIX_FALLBACK", "never"),
+    ]);
+    for name in ["nix", "nix-instantiate"] {
+        for flags in [vec!["--quiet"; 10], vec!["--debug", "--quiet", "-vv"]] {
+            let mut args = vec![name, "--log-format", "internal-json"];
+            args.extend(flags);
+            if name == "nix" {
+                args.push("eval");
+            } else {
+                args.push("--eval");
+            }
+            args.extend(["--expr", "6 * 7"]);
+            let value = run(&args, &host);
+            assert_eq!((value.rc, value.stdout.trim()), (0, "42"), "{}", value.stderr);
+            *args.last_mut().unwrap() = "throw \"verbosity-error-marker\"";
+            let failure = run(&args, &host);
+            assert_eq!(failure.rc, 1, "{}", failure.stderr);
+            assert!(failure.stdout.is_empty());
+            let errors = records(&failure.stderr);
+            assert!(errors.iter().any(|r| r["level"] == 0
+                && r["msg"].as_str().is_some_and(|s| s.contains("verbosity-error-marker"))),
+                "{}", failure.stderr);
         }
     }
 }
@@ -1201,19 +1234,6 @@ fn ignored_flags_and_settings() {
             .filter(|r| r["code"] == code)
             .collect()
     };
-    let vb = f.both(
-        "nix-instantiate",
-        &["--eval", "-v", "--verbose", "-E", "1 + 1"],
-    );
-    c.same("nix-instantiate -v --verbose", &vb);
-    c.check(
-        "-v is one warning with the reason",
-        once(
-            &stderr(&vb.ours),
-            "warning: '--verbose' is ignored: iets has one log level",
-        ),
-        stderr(&vb.ours),
-    );
     s.write(
         "nc/flake.nix",
         "{\n  nixConfig.extra-substituters = [ \"https://cache.invalid\" ];\n  outputs = { self }: { x = 1; };\n}\n",

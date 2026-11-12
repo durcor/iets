@@ -11,7 +11,7 @@ use std::thread;
 
 use super::{
     Argv, Common, attached_max_jobs, common_flag, develop, drvshow, eval_config, fallback, fmt,
-    local, lookup_file_arg, settings, shell_settings, store_given,
+    local, lookup_file_arg, settings, shell_settings, store_given, verbose_cluster, verbosity_flag,
 };
 use crate::api::build::{self, Dispatch, Root};
 use crate::api::{self, flake, installable};
@@ -43,6 +43,8 @@ const GLOBALS: &[(&str, usize)] = &[
     ("--show-trace", 0),
     ("-v", 0),
     ("--verbose", 0),
+    ("--quiet", 0),
+    ("--debug", 0),
     ("--log-format", 1),
     ("--experimental-features", 1),
     ("--extra-experimental-features", 1),
@@ -118,7 +120,7 @@ fn find_sub(argv: &[String]) -> Result<usize, String> {
         if !s.starts_with('-') {
             return Ok(i);
         }
-        if attached_max_jobs(s).is_some() {
+        if attached_max_jobs(s).is_some() || verbose_cluster(s) {
             i += 1;
             continue;
         }
@@ -132,7 +134,10 @@ fn find_sub(argv: &[String]) -> Result<usize, String> {
 
 /// `Ok(true)`: consumed. `Ok(false)`: not one of ours. `Err`: fall back.
 pub fn global_flag(c: &mut Common, a: &mut Argv, s: &str) -> Result<bool, String> {
-    if attached_max_jobs(s).is_none() && !GLOBALS.iter().any(|(f, _)| *f == s) {
+    if attached_max_jobs(s).is_none()
+        && !verbose_cluster(s)
+        && !GLOBALS.iter().any(|(f, _)| *f == s)
+    {
         return Ok(false);
     }
     match s {
@@ -475,6 +480,9 @@ fn dev_env_main(argv: &[String], rest: &[String]) -> i32 {
     let mut pass: Vec<String> = Vec::new();
     let mut flakes = 0;
     for s in rest {
+        if verbosity_flag(s) {
+            continue;
+        }
         if s.starts_with('-') && s != "--json" {
             fallback(NAME, argv, &format!("'{s}' is not implemented"));
         }
@@ -486,7 +494,7 @@ fn dev_env_main(argv: &[String], rest: &[String]) -> i32 {
     if flakes > 1 {
         fallback(NAME, argv, "'nix print-dev-env' takes one installable");
     }
-    // no flag reached here, so main.cc's default stands
+    // No purity flag reached here, so main.cc's default stands.
     pass.push("--pure-eval".into());
     devenv::cmd_print_dev_env(&pass)
 }
@@ -802,5 +810,50 @@ mod tests {
         assert!(n.c.flags.overrides.contains(&set));
         let before = args(&["--flake-registry", "", "eval", "--expr", "1"]);
         assert_eq!(find_sub(&before), Ok(2));
+    }
+
+    #[test]
+    fn verbosity_order_crosses_the_subcommand_without_changing_operands() {
+        for (before, after, expected) in [
+            (vec!["--debug"], vec!["--quiet"], 5),
+            (vec!["--quiet"], vec!["--debug"], 6),
+            (vec!["-vvvvvvvv"], vec!["--quiet"], 6),
+            (vec!["--quiet"; 9], vec!["-vv"], 2),
+        ] {
+            let session = crate::session::Session::new();
+            let sink = crate::sink::Sink::default();
+            session.log.write_to(Box::new(sink.clone()));
+            let _entered = session.enter();
+            let mut argv = args(&before);
+            argv.extend(args(&["--argstr", "value", "--debug", "eval"]));
+            argv.extend(args(&after));
+            argv.extend(args(&["--expr", "{ value }: value"]));
+            let k = find_sub(&argv).unwrap();
+            assert_eq!(argv.remove(k), "eval");
+            let n = parse_eval(&argv).unwrap();
+            assert!(matches!(&n.c.flags.args[0], (name, crate::api::ArgKind::Str(value))
+                if name == "value" && value == "--debug"));
+            for level in 0..=7 {
+                crate::log::msg(level, &format!("message{level}"));
+            }
+            let text = sink.text();
+            for level in 0..=7 {
+                assert_eq!(text.contains(&format!("message{level}")), level <= expected,
+                    "{before:?} eval {after:?}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn verbosity_does_not_expand_unrelated_clusters_or_expression_operands() {
+        let session = crate::session::Session::new();
+        let _entered = session.enter();
+        for flag in ["-vq", "-vL", "-v=2", "-vvx"] {
+            assert!(find_sub(&args(&[flag, "eval"])).is_err());
+            assert!(parse_eval(&args(&[flag, "--expr", "1"])).is_err());
+        }
+        let n = parse_eval(&args(&["--expr", "--quiet"])).unwrap();
+        assert_eq!(n.expr.as_deref(), Some("--quiet"));
+        assert_eq!(crate::log::verbosity(), 3);
     }
 }

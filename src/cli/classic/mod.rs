@@ -12,6 +12,7 @@ pub mod shell;
 
 use crate::session::exit;
 use crate::sys::process;
+use std::io::{self, IsTerminal};
 use std::process::Command;
 
 use crate::cli::{EvalArgs, EvalFlags, abs_path, eval_flag, full_includes, jobs};
@@ -35,6 +36,11 @@ pub const NAMES: &[&str] = &[
 /// Runs the classic command `name`. `argv` is everything after `argv[0]`.
 pub fn dispatch(name: &str, argv: &[String]) -> i32 {
     log::set_classic();
+    log::set_verbosity(if name == "nix" && io::stderr().is_terminal() {
+        log::LVL_NOTICE
+    } else {
+        log::LVL_INFO
+    });
     if Session::current().settings().nix_fallback == NixFallback::Always {
         fallback(name, argv, "nix-fallback is always");
     }
@@ -50,9 +56,16 @@ pub fn dispatch(name: &str, argv: &[String]) -> i32 {
 /// Execs the real `name` with the same arguments. `nix-fallback = never` makes
 /// this an error instead, so a test can see which cases fall back.
 pub fn fallback(name: &str, argv: &[String], reason: &str) -> ! {
-    log::line(&format!("iets: falling back to {name}: {reason}"));
-    if Session::current().settings().nix_fallback == NixFallback::Never {
-        log::line(&format!("iets: nix-fallback is never, not running {name}"));
+    let strict = Session::current().settings().nix_fallback == NixFallback::Never;
+    log::msg(
+        if strict { log::LVL_ERROR } else { log::LVL_NOTICE } as u8,
+        &format!("iets: falling back to {name}: {reason}"),
+    );
+    if strict {
+        log::msg(
+            log::LVL_ERROR as u8,
+            &format!("iets: nix-fallback is never, not running {name}"),
+        );
         exit(1)
     }
     let Some(real) = nixbin::real(name) else {
@@ -108,8 +121,29 @@ fn attached_max_jobs(s: &str) -> Option<&str> {
     s.strip_prefix("-j").filter(|v| !v.is_empty())
 }
 
+/// Only Nix's pure verbose clusters, not unrelated short-flag combinations.
+fn verbose_cluster(s: &str) -> bool {
+    s.len() > 2 && s.starts_with('-') && s.as_bytes()[1..].iter().all(|&b| b == b'v')
+}
+
+fn verbosity_flag(s: &str) -> bool {
+    match s {
+        "-v" | "--verbose" => log::increase_verbosity(),
+        "--quiet" => log::decrease_verbosity(),
+        "--debug" => log::set_verbosity(log::LVL_DEBUG),
+        _ if verbose_cluster(s) => {
+            log::set_verbosity(log::verbosity().saturating_add((s.len() - 1) as u64));
+        }
+        _ => return false,
+    }
+    true
+}
+
 /// `Ok(true)`: consumed. `Ok(false)`: not one of ours. `Err`: fall back.
 pub fn common_flag(c: &mut Common, a: &mut Argv, s: &str) -> Result<bool, String> {
+    if verbosity_flag(s) {
+        return Ok(true);
+    }
     if eval_flag(&mut c.flags, s, || a.value(s))? {
         return Ok(true);
     }
@@ -127,8 +161,6 @@ pub fn common_flag(c: &mut Common, a: &mut Argv, s: &str) -> Result<bool, String
         "--cores" => set.push(("cores".into(), a.number(s, "cores")?)),
         "-k" | "--keep-going" => set.push(("keep-going".into(), "true".into())),
         "-K" | "--keep-failed" => set.push(("keep-failed".into(), "true".into())),
-        "--quiet" => c.quiet = true,
-        "-v" | "--verbose" => ignored::flag("--verbose", ignored::ONE_LOG_LEVEL),
         // `--indirect` does nothing in Nix either (nix-build.cc: "obsolete").
         // Only nix-instantiate has the GC warning, and it takes that flag itself.
         "--no-gc-warning" | "--indirect" => {}
@@ -283,20 +315,108 @@ mod tests {
         assert!(flag(&["--experimental-features", "flakes parse-toml-timestamps"]).is_err());
         let all = vec!["-v".to_string()];
         let mut a = Argv { all: &all, i: 0 };
-        for f in ["-v", "--verbose", "--no-gc-warning", "--indirect"] {
+        for f in ["--no-gc-warning", "--indirect"] {
             assert_eq!(common_flag(&mut Common::default(), &mut a, f), Ok(true));
         }
         let noted = ignored::noted("ignored-flag");
-        for f in ["--accept-flake-config", "--eval-store", "--verbose"] {
+        for f in ["--accept-flake-config", "--eval-store"] {
             assert_eq!(noted.iter().filter(|n| *n == f).count(), 1, "{f}");
         }
         for f in [
-            "-v",
             "--no-gc-warning",
             "--indirect",
             "--extra-experimental-features",
         ] {
             assert!(!noted.iter().any(|n| n == f), "{f}");
         }
+    }
+
+    fn messages(flags: &[&str]) -> (Common, String) {
+        let session = Session::new();
+        let sink = crate::sink::Sink::default();
+        session.log.write_to(Box::new(sink.clone()));
+        let _entered = session.enter();
+        let all: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
+        let mut a = Argv { all: &all, i: 0 };
+        let mut c = Common::default();
+        while a.i < all.len() {
+            let s = &all[a.i];
+            assert_eq!(common_flag(&mut c, &mut a, s), Ok(true));
+            a.i += 1;
+        }
+        for level in 0..=7 {
+            log::msg(level, &format!("probe{level}"));
+        }
+        (c, sink.text())
+    }
+
+    #[test]
+    fn verbosity_flags_filter_messages_in_order_and_saturate() {
+        for (flags, threshold) in [
+            (vec!["-v"], 4),
+            (vec!["--verbose", "-v"], 5),
+            (vec!["-vv"], 5),
+            (vec!["-vvvvvvvvvvvv"], 7),
+            (vec!["--quiet"], 2),
+            (vec!["--quiet"; 10], 0),
+            (vec!["--debug", "--quiet"], 5),
+            (vec!["--quiet", "--debug"], 6),
+            (vec!["-vvvvvvvv", "--quiet"], 6),
+            (vec!["--debug", "-vv", "--quiet"], 6),
+        ] {
+            let (c, text) = messages(&flags);
+            assert!(!c.quiet, "verbosity must not disable builder output");
+            for level in 0..=7 {
+                assert_eq!(text.contains(&format!("probe{level}")), level <= threshold,
+                    "{flags:?} at {level}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn verbosity_is_inherited_by_bound_workers_not_other_sessions() {
+        let session = Session::new();
+        let sink = crate::sink::Sink::default();
+        session.log.write_to(Box::new(sink.clone()));
+        let _entered = session.enter();
+        let all = Vec::new();
+        let mut a = Argv { all: &all, i: 0 };
+        assert_eq!(common_flag(&mut Common::default(), &mut a, "--quiet"), Ok(true));
+        std::thread::spawn(crate::session::bind(|| {
+            log::msg(2, "worker-notice");
+            log::msg(3, "worker-info");
+        })).join().unwrap();
+        let other = Session::new();
+        other.log.write_to(Box::new(sink.clone()));
+        {
+            let _other = other.enter();
+            log::msg(3, "independent-info");
+        }
+        assert_eq!(sink.text(), "worker-notice\nindependent-info\n");
+    }
+
+    #[test]
+    fn strict_fallback_keeps_the_reason_and_error_at_quiet_zero() {
+        let session = Session::new();
+        session.use_settings(crate::settings::Settings {
+            nix_fallback: NixFallback::Never,
+            ..crate::settings::Settings::default()
+        });
+        session.catch_exit.store(true, std::sync::atomic::Ordering::Relaxed);
+        let sink = crate::sink::Sink::default();
+        session.log.write_to(Box::new(sink.clone()));
+        let _entered = session.enter();
+        log::set_verbosity(0);
+        log::set_format("internal-json").unwrap();
+        let e = std::panic::catch_unwind(|| fallback("nix", &[], "unsupported-token"))
+            .unwrap_err();
+        assert_eq!(e.downcast_ref::<crate::session::Exit>().unwrap().0, 1);
+        let text = sink.text();
+        let records: Vec<serde_json::Value> = text.lines().map(|line| {
+            serde_json::from_str(line.strip_prefix("@nix ").unwrap()).unwrap()
+        }).collect();
+        assert!(!records.is_empty(), "{text}");
+        assert!(records.iter().all(|r| r["level"] == 0), "{text}");
+        assert!(text.contains("unsupported-token") && text.contains("nix-fallback is never"), "{text}");
     }
 }

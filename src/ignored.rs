@@ -115,9 +115,6 @@ pub fn noted(code: &str) -> Vec<String> {
     keys.map(|n| n.key.clone()).collect()
 }
 
-/// Why `-v`, `--verbose` and `--debug` change nothing.
-pub const ONE_LOG_LEVEL: &str = "iets has one log level, the one Nix starts at";
-
 /// Why `--accept-flake-config` and the `accept-flake-config` setting change
 /// nothing (docs/reference/divergences.md).
 pub const NO_NIX_CONFIG: &str = "iets never applies a flake's nixConfig, so a flake that sets extra-substituters or allow-import-from-derivation there runs without them; put the settings in nix.conf";

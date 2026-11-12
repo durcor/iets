@@ -284,7 +284,7 @@ fn out_links_and_roots() {
     let shell = format!("path:{}", s.pkgs().display());
     let a = f
         .ours("nix")
-        .args(["print-dev-env", &shell])
+        .args(["--debug", "print-dev-env", "--quiet", "-vv", &shell])
         .output()
         .unwrap();
     let b = s.iets().args(["print-dev-env", &shell]).output().unwrap();
@@ -579,12 +579,15 @@ fn activity_records() {
 fn nh_nom_arguments_preserve_native_builds_and_json_logs() {
     let s = store!();
     let f = Farm::new(&s);
-    for (index, (flag, before, fails)) in [
-        ("--verbose", false, false),
-        ("-v", false, false),
-        ("--verbose", true, false),
-        ("-v", true, false),
-        ("--verbose", false, true),
+    for (index, (flags, before, fails)) in [
+        (&["--verbose"][..], false, false),
+        (&["-v"][..], false, false),
+        (&["--verbose"][..], true, false),
+        (&["-v"][..], true, false),
+        (&["--verbose"][..], false, true),
+        (&["-vvvvvvvv"][..], true, false),
+        (&["--quiet", "--quiet", "--quiet", "--quiet"][..], false, false),
+        (&["--quiet", "--quiet", "--quiet", "--quiet"][..], true, true),
     ]
     .into_iter()
     .enumerate()
@@ -618,7 +621,7 @@ fn nh_nom_arguments_preserve_native_builds_and_json_logs() {
         let mut cmd = f.ours("nix");
         cmd.env("IETS_NIX_FALLBACK", "never");
         if before {
-            cmd.arg(flag);
+            cmd.args(flags);
         }
         cmd.arg("build")
             .arg(format!("path:{}#default", s.dir().join(&dir).display()))
@@ -636,14 +639,14 @@ fn nh_nom_arguments_preserve_native_builds_and_json_logs() {
                 "internal-json",
             ]);
         if !before {
-            cmd.arg(flag);
+            cmd.args(flags);
         }
         let o = cmd.output().unwrap();
         let err = stderr(&o);
         assert_eq!(
             o.status.code(),
             Some(i32::from(fails)),
-            "{flag} before={before}: {err}"
+            "{flags:?} before={before}: {err}"
         );
         assert!(!err.contains("falling back"), "{err}");
         if fails {
@@ -721,11 +724,6 @@ fn nh_nom_arguments_preserve_native_builds_and_json_logs() {
         assert!(active.is_empty(), "unclosed activities: {active:?}\n{err}");
         assert_eq!(build_ids.len(), 1, "{err}");
         assert_eq!(lines, ["nom-builder-stdout", "nom-builder-stderr"], "{err}");
-        assert_eq!(
-            recs.iter().filter(|r| r["code"] == "ignored-flag").count(),
-            1,
-            "{err}"
-        );
         assert_eq!(
             recs.iter()
                 .any(|r| r["code"] == "build-failed" && r["level"] == 0),

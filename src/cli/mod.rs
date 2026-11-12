@@ -129,7 +129,16 @@ pub fn cache_flag(a: &mut EvalArgs, s: &str, mut next: impl FnMut() -> String) -
 }
 
 pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
-    parse_native_args(argv, false, |_, _| false).0
+    parse_eval_args_with(argv, |_, _, _, _| false)
+}
+
+/// Command-owned flags share the evaluation cursor, so their spellings in
+/// another flag's operands remain data. The index identifies original argv.
+pub(crate) fn parse_eval_args_with(
+    argv: &[String],
+    command_flag: impl FnMut(&mut EvalFlags, usize, &str, &mut dyn FnMut() -> String) -> bool,
+) -> EvalArgs {
+    parse_native_args(argv, false, command_flag).0
 }
 
 /// Build aliases share `--option`'s ordered, validated config path. Parse
@@ -137,21 +146,21 @@ pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
 /// The Boolean records explicit limits for transports that cannot apply them.
 fn parse_build_eval_args(
     argv: &[String],
-    build_flag: impl FnMut(&str, &mut dyn FnMut() -> String) -> bool,
+    mut build_flag: impl FnMut(&str, &mut dyn FnMut() -> String) -> bool,
 ) -> (EvalArgs, bool) {
-    parse_native_args(argv, true, build_flag)
+    parse_native_args(argv, true, |_, _, s, next| build_flag(s, next))
 }
 
 fn parse_native_args(
     argv: &[String],
     build: bool,
-    mut command_flag: impl FnMut(&str, &mut dyn FnMut() -> String) -> bool,
+    mut command_flag: impl FnMut(&mut EvalFlags, usize, &str, &mut dyn FnMut() -> String) -> bool,
 ) -> (EvalArgs, bool) {
     let mut a = EvalArgs::new();
     let mut f = EvalFlags::default();
-    each_arg(argv, |s, next| {
+    help::each_arg_indexed(argv, |i, s, next| {
         match s {
-            _ if command_flag(s, &mut *next) => {}
+            _ if command_flag(&mut f, i, s, &mut *next) => {}
             _ if eval_flag(&mut f, s, || Ok(next())).unwrap_or_else(|e| arg_error(e)) => {}
             "-j" | "--max-jobs" if build => {
                 f.overrides.push(("max-jobs".into(), next()));
@@ -324,7 +333,7 @@ pub fn run_reported<T: Send + 'static>(
 }
 
 fn stacks<R>(e: StackError) -> R {
-    log::line(&format!("iets: {e}"));
+    log::msg(0, &format!("iets: {e}"));
     session::exit(1)
 }
 

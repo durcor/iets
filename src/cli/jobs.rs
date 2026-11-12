@@ -2,10 +2,10 @@
 
 use crate::session::exit;
 
-use crate::cli::help::{self, arg_error, value};
+use crate::cli::help::{self, arg_error};
 use crate::cli::{
-    self, EvalArgs, Input, abs_path, auto_args, cwd, evaluate, parse_eval_args, render, report,
-    run_for,
+    self, ArgKind, EvalArgs, Input, abs_path, auto_args, cwd, evaluate, parse_eval_args_with,
+    render, report, run_for,
 };
 use crate::error::{self, Error as CrateError};
 use crate::eval::{Error, Evaluator, Pos};
@@ -42,8 +42,8 @@ struct JobsArgs {
     /// `--max-memory-size MB`: worker processes restarted above it;
     /// `0` is one process with no ceiling.
     max_memory: u64,
-    /// `--arg-from-stdin NAME`: what was read, for the worker argv.
-    stdin_args: Vec<(String, String)>,
+    /// Parsed `--arg-from-stdin NAME`: original flag index and the value read.
+    stdin_args: Vec<(usize, String, String)>,
     worker: bool,
     flake: bool,
     /// Its own flag, not `EvalArgs::pure`: nix-eval-jobs.cc lets it beat `--flake`.
@@ -51,7 +51,7 @@ struct JobsArgs {
     quiet: bool,
 }
 
-fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
+fn parse_jobs_args(argv: &[String]) -> (JobsArgs, EvalArgs) {
     let mut j = JobsArgs {
         opts: Opts {
             force_recurse: false,
@@ -76,17 +76,6 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
         impure: false,
         quiet: false,
     };
-    let mut rest: Vec<String> = Vec::new();
-    let mut i = 0;
-    let arg = |i: &mut usize| -> String {
-        *i += 1;
-        value(argv, *i, &argv[*i - 1]).clone()
-    };
-    let num = |i: &mut usize| -> u64 {
-        let v = arg(i);
-        v.parse()
-            .unwrap_or_else(|_| arg_error(format!("{} wants a number, got '{v}'", argv[*i - 1])))
-    };
     let unsupported = |flag: &str, why: &str| -> ! {
         exit(
             CrateError::Unsupported(format!(
@@ -95,8 +84,12 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
             .report(),
         )
     };
-    while i < argv.len() {
-        let s = argv[i].as_str();
+    let a = parse_eval_args_with(argv, |f, index, s, next| {
+        let num = |next: &mut dyn FnMut() -> String| -> u64 {
+            let v = next();
+            v.parse()
+                .unwrap_or_else(|_| arg_error(format!("{s} wants a number, got '{v}'")))
+        };
         match s {
             "--force-recurse" => j.opts.force_recurse = true,
             "--meta" => j.opts.meta = true,
@@ -105,59 +98,59 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
             "--constituents" => j.opts.constituents = true,
             "--provenance" => j.opts.provenance = true,
             "--check-cache-status" => j.check_cache_status = true,
-            "--chunks" => j.opts.chunks = (num(&mut i) as u32).max(1),
-            "--chunk" => j.opts.chunk = num(&mut i) as u32,
-            "--chunk-depth" => j.opts.chunk_depth = num(&mut i) as u32,
-            "--max-memory-size" => j.max_memory = num(&mut i),
-            "--apply" => j.apply = Some(arg(&mut i)),
-            "--select" => j.select = Some(arg(&mut i)),
+            "--chunks" => j.opts.chunks = (num(next) as u32).max(1),
+            "--chunk" => j.opts.chunk = num(next) as u32,
+            "--chunk-depth" => j.opts.chunk_depth = num(next) as u32,
+            "--max-memory-size" => j.max_memory = num(next),
+            "--apply" => j.apply = Some(next()),
+            "--select" => j.select = Some(next()),
             "--gc-roots-dir" => {
-                let d = arg(&mut i);
+                let d = next();
                 let cwd = cwd();
                 j.gc_roots_dir = Some(PathBuf::from(
                     <std::ffi::OsStr as crate::sys::OsStrExt>::from_bytes(&abs_path(&d, &cwd)),
                 ));
             }
-            "--eval-store" => j.eval_store = arg(&mut i),
+            "--eval-store" => j.eval_store = next(),
             // holds by construction: it caps the builds of an import from
             // derivation, and iets builds nothing while it evaluates
             "--max-jobs" | "-j" => {
-                let _ = arg(&mut i);
+                let _ = next();
             }
             "--flake" => j.flake = true,
             "--impure" => j.impure = true,
-            "--worker" => j.worker = true,
+            "--worker" => {
+                j.worker = true;
+                ignored::hush();
+            }
             "--quiet" => j.quiet = true,
-            "--verbose" | "--debug" => ignored::flag(s, ignored::ONE_LOG_LEVEL),
+            "--verbose" => log::increase_verbosity(),
+            "--debug" => log::set_verbosity(log::LVL_DEBUG),
             "--override-input" | "--override-flake" => unsupported(
                 s,
                 "iets evaluates locked flakes only; an override makes the lock file incomplete",
             ),
             "--repair" => unsupported(s, "iets does not write or repair store paths"),
             "--arg-from-file" => {
-                let name = arg(&mut i);
-                let path = arg(&mut i);
+                let name = next();
+                let path = next();
                 let contents = fs::read_to_string(&path).unwrap_or_else(|e| {
                     exit(CrateError::io(format!("cannot read '{path}'"), e).report())
                 });
-                rest.extend(["--argstr".to_string(), name, contents]);
+                f.args.push((name, ArgKind::Str(contents)));
             }
             "--arg-from-stdin" => {
-                let name = arg(&mut i);
+                let name = next();
                 let contents = io::read_to_string(io::stdin())
                     .unwrap_or_else(|e| exit(CrateError::io("cannot read stdin", e).report()));
-                rest.extend(["--argstr".to_string(), name.clone(), contents.clone()]);
-                j.stdin_args.push((name, contents));
+                f.args.push((name.clone(), ArgKind::Str(contents.clone())));
+                j.stdin_args.push((index, name, contents));
             }
-            "--include" => {
-                rest.push("-I".to_string());
-                rest.push(arg(&mut i));
-            }
-            _ => rest.push(s.to_string()),
+            _ => return false,
         }
-        i += 1;
-    }
-    (j, rest)
+        true
+    });
+    (j, a)
 }
 
 /// A worker process's arguments: `argv` with every `--arg-from-stdin`
@@ -167,19 +160,13 @@ fn worker_argv(argv: &[String], j: &JobsArgs) -> Vec<String> {
     // `--iets-option` left `argv` before this command saw it, and a worker
     // reads its own settings, so the triples go back on here
     let mut out: Vec<String> = Session::current().settings().option_argv();
-    let mut read = j.stdin_args.iter();
-    let mut i = 0;
-    while i < argv.len() {
-        if argv[i] == "--arg-from-stdin" {
-            if let Some((name, contents)) = read.next() {
-                out.extend(["--argstr".to_string(), name.clone(), contents.clone()]);
-            }
-            i += 2;
-            continue;
-        }
-        out.push(argv[i].clone());
-        i += 1;
+    let mut start = 0;
+    for (index, name, contents) in &j.stdin_args {
+        out.extend(argv[start..*index].iter().cloned());
+        out.extend(["--argstr".to_string(), name.clone(), contents.clone()]);
+        start = *index + 2;
     }
+    out.extend(argv[start..].iter().cloned());
     out
 }
 
@@ -219,11 +206,7 @@ fn check_jobs_args(j: &JobsArgs) -> error::Result<Transport> {
 /// `--max-memory-size 0` is one process with no ceiling.
 /// See docs/reference/commands.md.
 pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
-    let (j, rest) = parse_jobs_args(argv);
-    if j.worker {
-        ignored::hush();
-    }
-    let mut a = parse_eval_args(&rest);
+    let (j, mut a) = parse_jobs_args(argv);
     a.no_tracing_cache = true;
     a.flake_whole = true;
     // nix-eval-jobs takes the argument as a file unless --flake says otherwise.
@@ -561,4 +544,58 @@ fn jobs_collector(
         }
     }
     jobs_finish(&emitter, j, conn.as_mut(), None, t0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(argv: &[&str]) -> Vec<String> {
+        argv.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn jobs_verbosity_changes_actual_messages_without_redefining_quiet() {
+        for (flags, threshold, quiet) in [
+            (vec!["--verbose"], 4, false),
+            (vec!["--verbose"; 10], 7, false),
+            (vec!["--debug"], 6, false),
+            (vec!["--debug", "--verbose"], 7, false),
+            (vec!["--verbose", "--verbose", "--debug"], 6, false),
+            (vec!["--quiet"], 3, true),
+            (vec!["--quiet", "--debug"], 6, true),
+        ] {
+            let session = Session::new();
+            let sink = crate::sink::Sink::default();
+            session.log.write_to(Box::new(sink.clone()));
+            let _entered = session.enter();
+            let (j, _) = parse_jobs_args(&args(&flags));
+            assert_eq!(j.quiet, quiet);
+            for level in 0..=7 {
+                log::msg(level, &format!("jobs-message{level}"));
+            }
+            let text = sink.text();
+            for level in 0..=7 {
+                assert_eq!(text.contains(&format!("jobs-message{level}")), level <= threshold,
+                    "{flags:?}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn jobs_shared_operands_are_not_reparsed_as_command_flags() {
+        for value in ["--verbose", "--debug", "--quiet", "--arg-from-stdin"] {
+            let session = Session::new();
+            let _entered = session.enter();
+            help::set_command("eval-jobs");
+            let argv = args(&["--argstr", "value", value, "--expr", "--verbose"]);
+            let (j, a) = parse_jobs_args(&argv);
+            assert!(!j.quiet);
+            assert_eq!(log::verbosity(), 3);
+            assert!(matches!(&a.input, Some(Input::Expr(e)) if e == "--verbose"));
+            assert!(matches!(&a.args[0], (name, crate::api::ArgKind::Str(v))
+                if name == "value" && v == value));
+            assert_eq!(worker_argv(&argv, &j), argv);
+        }
+    }
 }

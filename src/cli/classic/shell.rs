@@ -359,7 +359,7 @@ fn realise(s: &Shell, transport: &Transport, options: &Options, r: Ready, cores:
         match e {
             // under internal-json a line of a build is already its result record
             Event::Log(l) if !quiet && (l.drv_path.is_empty() || !log::json()) => {
-                log::line(&String::from_utf8_lossy(&l.line))
+                log::relay(&String::from_utf8_lossy(&l.line))
             }
             Event::Failed(f) => {
                 failed.set(true);

@@ -497,35 +497,83 @@ fn every_line_has_stats(bin: Iets) {
     );
 }
 
-/// `--verbose` and `--debug` are one warning each, from the main process;
-/// `--max-jobs` and `--quiet` hold (docs/reference/divergences.md).
+/// Quiet controls the summary only, not evaluator diagnostics or JSON results,
+/// in either the single-process or real collector/worker path.
 #[rstest]
-fn ignored_flags_warn_once(bin: Iets) {
-    let o = ci(&bin)
-        .args([
-            "--verbose",
-            "--debug",
-            "--verbose",
-            "--max-jobs",
-            "1",
-            "--quiet",
-            "ci.nix",
-        ])
-        .output()
-        .unwrap();
-    assert!(o.status.success(), "{}", stderr(&o));
-    let warned: Vec<String> = stderr(&o)
-        .lines()
-        .filter(|l| l.starts_with("warning: "))
-        .map(String::from)
-        .collect();
-    let want: Vec<String> = ["--verbose", "--debug"]
-        .iter()
-        .map(|f| {
-            format!("warning: '{f}' is ignored: iets has one log level, the one Nix starts at")
-        })
-        .collect();
-    assert_eq!(warned, want);
+fn verbosity_keeps_jobs_diagnostics_and_quiet_summary_distinct(bin: Iets) {
+    let expr = r#"builtins.trace "jobs-diagnostic-marker" {
+      good = derivation { name = "jobs-verbosity"; system = "x86_64-linux"; builder = "/bin/sh"; };
+      bad = throw "jobs-error-marker";
+    }"#;
+    for memory in ["0", "4096"] {
+        for flags in [vec![], vec!["--verbose"], vec!["--debug", "--verbose"], vec!["--verbose", "--debug", "--quiet"]] {
+            let o = bin.cmd().args([
+                "eval-jobs", "--no-instantiate", "--workers", "1",
+                "--max-memory-size", memory, "--expr", expr,
+            ]).args(&flags).output().unwrap();
+            let err = stderr(&o);
+            assert!(o.status.success(), "{memory} {flags:?}: {err}");
+            let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout).lines()
+                .map(|line| serde_json::from_str(line).unwrap()).collect();
+            assert_eq!(lines.len(), 2, "{lines:?}\n{err}");
+            assert!(lines.iter().any(|line| line["name"] == "jobs-verbosity"), "{lines:?}");
+            assert!(lines.iter().any(|line| line["error"].as_str()
+                .is_some_and(|e| e.contains("jobs-error-marker"))), "{lines:?}");
+            assert!(err.contains("jobs-diagnostic-marker"), "{memory} {flags:?}: {err}");
+            assert_eq!(err.contains("eval-jobs:"), !flags.contains(&"--quiet"), "{err}");
+        }
+    }
+}
+
+#[rstest]
+fn verbosity_looking_jobs_operands_remain_data_in_workers(bin: Iets) {
+    for memory in ["0", "4096"] {
+        for value in ["--verbose", "--debug", "--quiet", "--arg-from-stdin"] {
+            let o = bin.cmd().args([
+                "eval-jobs", "--no-instantiate", "--workers", "1", "--quiet",
+                "--max-memory-size", memory, "--argstr", "value", value,
+                "--expr", "{ value }: { job = derivation { name = \"jobs-operand\"; system = \"x86_64-linux\"; builder = \"/bin/sh\"; inherit value; }; }",
+            ]).output().unwrap();
+            let err = stderr(&o);
+            assert!(o.status.success(), "{memory} {value}: {err}");
+            let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout).lines()
+                .map(|line| serde_json::from_str(line).unwrap()).collect();
+            assert_eq!(lines.len(), 1, "{err}");
+            assert_eq!(lines[0]["name"], "jobs-operand", "{err}");
+            assert!(lines[0]["drvPath"].as_str().is_some_and(|p| p.ends_with(".drv")), "{lines:?}");
+        }
+    }
+}
+
+#[rstest]
+fn stdin_substitution_rewrites_only_parsed_flags_in_worker_argv(bin: Iets) {
+    use std::io::Write;
+
+    let expr = "{ value, extra }: { job = derivation { name = \"jobs-stdin-operand\"; system = \"x86_64-linux\"; builder = \"/bin/sh\"; inherit value extra; }; }";
+    for memory in ["0", "4096"] {
+        let mut baseline = bin.cmd();
+        baseline.args([
+            "eval-jobs", "--no-instantiate", "--workers", "1", "--quiet",
+            "--max-memory-size", memory, "--argstr", "value", "--arg-from-stdin",
+            "--argstr", "extra", "--debug", "--expr", expr, "--verbose", "--debug",
+        ]);
+        let expected = baseline.output().unwrap();
+        assert!(expected.status.success(), "{}", stderr(&expected));
+        let expected_lines = norm(&expected);
+        assert_eq!(expected_lines.len(), 1);
+        assert!(expected_lines[0].contains("jobs-stdin-operand"));
+
+        let mut child = bin.cmd().args([
+            "eval-jobs", "--no-instantiate", "--workers", "1", "--quiet",
+            "--max-memory-size", memory, "--argstr", "value", "--arg-from-stdin",
+            "--arg-from-stdin", "extra", "--expr", expr, "--verbose", "--debug",
+        ]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().unwrap();
+        child.stdin.take().unwrap().write_all(b"--debug").unwrap();
+        let actual = child.wait_with_output().unwrap();
+        assert!(actual.status.success(), "{}", stderr(&actual));
+        assert_eq!(norm(&actual), expected_lines, "{}", stderr(&actual));
+    }
 }
 
 /// `accept-flake-config` waits for a flake with a `nixConfig`, as nixbot
