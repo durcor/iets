@@ -27,6 +27,39 @@ purely by default, so it has no `<nixpkgs>` search path and no
 `builtins.currentSystem`. An expression that reads either needs
 `--impure`.
 
+## Use native evaluation in NH, keeping nom
+
+Construct an NH-scoped package with the flake's curried helper:
+
+```nix
+let
+  ietsPkg = inputs.iets.packages.${pkgs.stdenv.hostPlatform.system}.default;
+  nhWithIets = inputs.iets.lib.mkNh pkgs ietsPkg pkgs.nix pkgs.nh;
+in {
+  environment.systemPackages = [ nhWithIets ];
+}
+```
+
+Pass your selected NH package in place of `pkgs.nh` if it comes from another
+package set or already contains fixes you need. The helper does not rebuild
+NH or change its version, CLI, resources or nom dependency. It generates a
+binary wrapper around the supplied NH entry point, with the existing classic
+provider scoped to that program. It does not change `nix.package`, replace
+system Nix, or require a shell shim, alias or manual PATH setup. Do not also
+install another package exporting `nh` into the same environment.
+
+Use that packaged `nh` normally; nom remains enabled. Select resources
+explicitly when needed, for example `nh os build . --max-jobs 1 --cores 1`.
+These limits control supported daemon builds, not evaluator threads; see
+[Classic mode](../reference/classic.md#where-the-builds-go) for transport
+limits. NH's helper commands, such as Nix version/config queries, may fall
+back to exactly the real Nix package passed as the third argument. Supported
+main builds evaluate natively; unsupported commands retain normal fallback.
+
+This expression constructs a package, not a deployment. Install or deploy
+the chosen package separately through your normal configuration workflow;
+it does not update an already installed NH or deploy iets to another host.
+
 ## Replace `nix search`
 
 ```sh

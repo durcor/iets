@@ -1152,6 +1152,7 @@ fn internal_json_errors() {
 fn nix_verbosity_spelling_as_an_operand_stays_data() {
     let s = store!();
     let f = Farm::new(&s);
+    let file = s.write("verbosity-operand.nix", "{ value }: { result = value; }");
     for value in ["-v", "--verbose"] {
         for before in [false, true] {
             let mut cmd = f.ours("nix");
@@ -1168,8 +1169,9 @@ fn nix_verbosity_spelling_as_an_operand_stays_data() {
                     "--raw",
                     "--log-format",
                     "internal-json",
-                    "--expr",
-                    "{ value }: value",
+                    "--file",
+                    file.to_str().unwrap(),
+                    "result",
                 ])
                 .output()
                 .unwrap();
@@ -1177,7 +1179,10 @@ fn nix_verbosity_spelling_as_an_operand_stays_data() {
             assert!(o.status.success(), "{value} before={before}: {err}");
             assert_eq!(stdout(&o), value, "{err}");
             assert!(!err.contains("falling back"), "{err}");
-            assert!(records(&err).iter().all(|r| r["code"] != "ignored-flag"), "{err}");
+            assert!(
+                records(&err).iter().all(|r| r["code"] != "ignored-flag"),
+                "{err}"
+            );
         }
     }
 }

@@ -52,6 +52,39 @@ Native `iets build` rejects explicit resource flags for these transports
 instead (`docs/reference/builders.md`).
 
 
+## Packaged NH integration
+
+`lib.mkNh = pkgs: iets: nix: nh: ...` returns the supplied NH package with a
+generated binary wrapper named `nh`. The wrapper prepends the existing
+classic provider to NH's runtime search path and executes NH's original
+entry point, including any existing wrapper. Other NH files, package
+version/metadata and runtime dependencies, including nom, are preserved;
+neither NH nor Nix is recompiled. No additional NH flake input is required.
+`lib.mkClassic` is unchanged.
+
+The `iets` argument selects the evaluator package; `nix` selects the real
+Nix underneath the classic provider. Unsupported helper operations such as
+`nix --version` and `nix config show` fall back to that same supplied Nix,
+not another version found on the user's PATH. The binding is scoped to the
+returned NH package: it changes neither `nix.package` nor other programs.
+See the [one-call recipe](../how-to/replace-nix-tools.md#use-native-evaluation-in-nh-keeping-nom)
+for installation scope and explicit resource selection.
+
+NH's normal `nix build ... --log-format internal-json --verbose | nom --json`
+pipeline is supported without changing arguments or disabling nom. Classic
+`nix` accepts `-v` and `--verbose` before or after its subcommand. As with
+other classic verbosity flags, iets keeps its existing single log level
+and emits an ignored-flag warning rather than increasing verbosity. Activity
+start/stop, progress and builder log records still reach nom; a failing
+builder still makes NH fail. Flag-shaped `--argstr` values remain operands.
+
+To prove one supported main build is native while allowing NH's helper
+queries to fall back, forward `-- --iets-option nix-fallback never` to that
+build. A global `IETS_NIX_FALLBACK=never` would also forbid legitimate helper
+fallback and is not required by this integration. The normal store and
+transport restrictions above still apply. nom 2.2.0 expects `/nix/store`
+paths, so its rendering does not support an arbitrary custom store prefix.
+
 ## The NixOS module
 
 `nix/module.nix` installs `packages.default`. On a host with direnv, it also
