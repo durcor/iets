@@ -189,7 +189,7 @@ Flags: `[FILE]`, `-E`/`--expr`, `-A`, `--arg`/`--argstr`, `-I`,
 `--add-drv-link`, `--indirect` and `--no-gc-warning` (these three do
 nothing in Nix's `nix-shell` either). With no `FILE`, or a directory, it
 looks for `shell.nix` and then `default.nix`. `<name>` goes through the
-search path. `-v` gives one warning, as for `nix-build`.
+search path.
 
 Nothing builds a `-env` derivation, as `print-dev-env` does. Instead:
 
